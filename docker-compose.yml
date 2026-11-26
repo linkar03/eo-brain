@@ -1,0 +1,70 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: eo-brain-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: eo_brain
+      # Password of the read-only agent_reader role (data agent). Change it in .env.
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD:-agent_reader_dev}
+    ports:
+      - "5433:5432"
+    volumes:
+      - eo_brain_pgdata:/var/lib/postgresql/data
+      # Init scripts run once, on an EMPTY volume, in file-name order (after the
+      # image's own 10_postgis.sh). Existing volumes are not re-initialised: apply
+      # agent_views.sql + agent_role.sql by hand, or recreate the volume.
+      - ./backend/eo_brain/db/schema.sql:/docker-entrypoint-initdb.d/20_schema.sql:ro
+      - ./backend/eo_brain/db/schema_vectors.sql:/docker-entrypoint-initdb.d/21_schema_vectors.sql:ro
+      - ./backend/eo_brain/db/agent_views.sql:/docker-entrypoint-initdb.d/30_agent_views.sql:ro
+      - ./backend/eo_brain/db/agent_role.sql:/docker-entrypoint-initdb.d/31_agent_role.sql:ro
+      - ./backend/eo_brain/db/agent_role_password.sh:/docker-entrypoint-initdb.d/32_agent_role_password.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: eo-brain-api
+    ports:
+      - "8001:8000"
+    environment:
+      - STAC_PROVIDER=element84-s2
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/eo_brain
+      - OUTPUT_DIR=/app/output
+      - API_BASE_URL=http://localhost:8001
+      - MAX_AREA_KM2=50000
+      - ANALYSIS_TIMEOUT_SEC=600
+      # Agent - read from host .env file (see .env.example)
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # Empty = built-in defaults in eo_brain/agent/providers/gemini.py
+      - GEMINI_MODEL=${GEMINI_MODEL:-}
+      - GEMINI_FALLBACK_MODELS=${GEMINI_FALLBACK_MODELS:-}
+      # Data agent: separate least-privilege connection (role agent_reader, SELECT on
+      # schema "agent" only, read-only transactions). Unset = query_database disabled.
+      - AGENT_DATABASE_URL=postgresql://agent_reader:${AGENT_DB_PASSWORD:-agent_reader_dev}@db:5432/eo_brain
+    volumes:
+      - ./backend/eo_brain:/app/eo_brain
+      - eo_brain_output:/app/output
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: eo-brain-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8001
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  eo_brain_pgdata:
+  eo_brain_output:

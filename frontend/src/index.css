@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import 'maplibre-gl/dist/maplibre-gl.css';
+@import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.maplibregl-map {
+  height: 100%;
+  width: 100%;
+}
+
+/* Draw control styling to match app theme */
+.mapbox-gl-draw_ctrl-draw-btn {
+  background-color: white !important;
+}
+
+.mapbox-gl-draw_ctrl-draw-btn.active {
+  background-color: #3b82f6 !important;
+}
+
+/* Popup styling */
+.maplibregl-popup-content {
+  padding: 12px;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+.maplibregl-popup-close-button {
+  font-size: 16px;
+  padding: 4px 8px;
+}
