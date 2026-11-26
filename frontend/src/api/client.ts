@@ -6,8 +6,7 @@ import type {
   Provider,
   Algorithm
 } from '../types';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+import { API_BASE } from './config';
 
 export class APIError extends Error {
   constructor(

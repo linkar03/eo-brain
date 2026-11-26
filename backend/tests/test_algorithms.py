@@ -114,7 +114,34 @@ class TestLISAMathematics:
         # Everything should be masked because background is below bio_gate
         assert np.all(severity == Severity.NONE)
         assert np.all(quadrant == MoranQuadrant.NONE)
-    
+
+    def test_bare_ground_is_not_vegetation_context(self):
+        """
+        Uniform vegetation next to bare ground is not an outlier: only
+        vegetated pixels enter the statistics and the spatial lag. A real
+        outlier inside the vegetation is still found.
+        """
+        data = np.full((30, 30), 0.60, dtype=np.float32)  # Uniform vegetation
+        data[:, :12] = 0.10                               # Bare ground strip
+        data[15, 22] = 0.95                               # Outlier inside the vegetation
+
+        ds = xr.Dataset({"ndvi": xr.DataArray(data, dims=["y", "x"])})
+
+        algo = LISAAlgorithm()
+        result = algo.run(ds, neighborhood_m=30, resolution_m=10, bio_gate=0.3)
+
+        severity = result.data["lisa_severity"].values
+        quadrant = result.data["lisa_quadrant"].values
+
+        # Bare ground is excluded, not scored
+        assert np.all(np.isnan(result.data["z_score"].values[:, :12]))
+        assert np.all(quadrant[:, :12] == MoranQuadrant.NONE)
+
+        # The vegetation edge along the bare strip raises no alert
+        flagged = np.argwhere(severity > Severity.NONE)
+        assert [tuple(p) for p in flagged] == [(15, 22)]
+        assert quadrant[15, 22] == MoranQuadrant.HL
+
     def test_severity_levels_ordered(self):
         """Higher z-scores should produce higher severity levels."""
         # Create gradient of outlier intensities

@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Send, Bot, User, Loader2, MapPin, X, Maximize2, Minimize2, Database } from 'lucide-react';
 import type { BBox } from '../types';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8001';
+import { API_BASE } from '../api/config';
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 150;
 

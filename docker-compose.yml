@@ -8,8 +8,9 @@ services:
       POSTGRES_DB: eo_brain
       # Password of the read-only agent_reader role (data agent). Change it in .env.
       AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD:-agent_reader_dev}
+    # Published on the loopback interface only: the superuser is postgres/postgres.
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - eo_brain_pgdata:/var/lib/postgresql/data
       # Init scripts run once, on an EMPTY volume, in file-name order (after the
@@ -29,8 +30,9 @@ services:
   api:
     build: .
     container_name: eo-brain-api
+    # Loopback only: the API has no authentication.
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     environment:
       - STAC_PROVIDER=element84-s2
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/eo_brain
@@ -58,7 +60,7 @@ services:
     build: ./frontend
     container_name: eo-brain-frontend
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     environment:
       - VITE_API_URL=http://localhost:8001
     depends_on:

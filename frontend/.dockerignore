@@ -1,0 +1,16 @@
+# Build context of the frontend image (docker-compose.yml: `build: ./frontend`).
+
+# Installed inside the image by `npm install`; a host copy would overwrite it
+# with binaries built for another platform.
+node_modules
+
+# Secrets: every .env file except an example
+.env
+.env.*
+!.env.example
+
+# Build output and caches
+dist
+.vite
+.cache
+*.log

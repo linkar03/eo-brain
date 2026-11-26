@@ -29,6 +29,10 @@ BLOCK_SIZE = 256
 # Overview resampling per data type
 _RESAMPLING = {"discrete": "nearest", "continuous": "bilinear"}
 
+# GDAL metadata tag naming the algorithm that produced the COG. The tile
+# server (api.tiles) reads it to pick the default colormap.
+ALGORITHM_TAG = "EO_BRAIN_ALGORITHM"
+
 
 def ensure_output_dir():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,6 +53,7 @@ def _write_cog(
     dtype: str,
     nodata: Union[int, float],
     overview_resampling: str = "nearest",
+    tags: Optional[Dict[str, str]] = None,
 ):
     """
     Single-pass COG write using GDAL's native COG driver.
@@ -60,6 +65,7 @@ def _write_cog(
         str(output_path),
         driver="COG",
         dtype=dtype,
+        tags=tags,
         compress="lzw",
         blocksize=BLOCK_SIZE,
         overview_resampling=overview_resampling,
@@ -79,6 +85,7 @@ def _save_cog(
     var_name: str,
     is_continuous: bool,
     suffix: str = "",
+    algorithm: Optional[str] = None,
 ) -> str:
     """
     Extract a variable from the dataset and save as COG.
@@ -109,7 +116,8 @@ def _save_cog(
     filename = f"{job_id}_{suffix}.tif" if suffix else f"{job_id}.tif"
     output_path = OUTPUT_DIR / filename
 
-    _write_cog(data, output_path, dtype, nodata, resampling)
+    tags = {ALGORITHM_TAG: algorithm} if algorithm else None
+    _write_cog(data, output_path, dtype, nodata, resampling, tags=tags)
     return str(output_path)
 
 
@@ -164,19 +172,21 @@ def save_severity_cog(
         if not severity_var:
             raise ValueError(f"No severity variable found. Available: {list(ds.data_vars)}")
 
-    return _save_cog(ds, job_id, crs, var_name=severity_var, is_continuous=False)
+    return _save_cog(ds, job_id, crs, var_name=severity_var, is_continuous=False,
+                     algorithm=algorithm)
 
 
 def save_ndvi_cog(
     ds: xr.Dataset, job_id: str, crs: str, bbox: tuple,
 ) -> str:
-    return _save_cog(ds, job_id, crs, var_name="ndvi", is_continuous=True)
+    return _save_cog(ds, job_id, crs, var_name="ndvi", is_continuous=True, algorithm="ndvi")
 
 
 def save_water_cog(
     ds: xr.Dataset, job_id: str, crs: str, bbox: tuple, index_name: str = "ndwi",
 ) -> str:
-    return _save_cog(ds, job_id, crs, var_name=index_name, is_continuous=True)
+    return _save_cog(ds, job_id, crs, var_name=index_name, is_continuous=True,
+                     algorithm=index_name)
 
 
 def save_multiband_cog(

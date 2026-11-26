@@ -19,8 +19,9 @@ scipy>=1.12.0
 
 # COG generation and tile serving
 rio-cogeo>=5.0.0
-rio-tiler>=6.0.0
+rio-tiler>=7.0.0       # api/tiles.py: Reader.get_geographic_bounds() and Info without min/maxzoom (7.0); tested with 7.0.0 and 9.4.14
 morecantile>=5.0.0
+pillow>=9.1            # api/tiles.py renders the PNGs (Image.Resampling); was only a transitive dependency
 
 # Database
 psycopg2-binary>=2.9.9

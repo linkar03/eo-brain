@@ -263,7 +263,10 @@ def get_provider(name: str) -> STACProvider:
 class LoadConfig:
     resolution_m: int = 10
     crs: Optional[str] = None
-    chunks: Dict[str, int] = field(default_factory=lambda: {"x": 1024, "y": 1024, "time": 1})
+    # Default matches the API's chunk policy for the default 10 m resolution
+    # (api.main._optimal_chunks: <=10 m -> 2048). The API always passes chunks
+    # explicitly; this default only applies to callers that do not.
+    chunks: Dict[str, int] = field(default_factory=lambda: {"x": 2048, "y": 2048, "time": 1})
     groupby: str = "solar_day"
 
     def resolve_crs(self, bbox: BBox) -> str:

@@ -129,14 +129,18 @@ class TestRequestValidation:
         assert "Unknown algorithm" in response.json()["detail"]
     
     def test_area_too_large(self, client):
-        response = client.post("/analyze", json={
-            "bbox": [10.0, 40.0, 15.0, 45.0],  # ~200,000 km²
-            "start_date": "2024-01-01T00:00:00",
-            "end_date": "2024-06-30T00:00:00",
-            "algorithm": "lisa"
-        })
+        # Area validation happens in Pydantic, so the request is rejected
+        # before any job row is written: no database is needed or touched.
+        with patch("eo_brain.api.main.job_repo") as repo:
+            response = client.post("/analyze", json={
+                "bbox": [10.0, 40.0, 15.0, 45.0],  # ~227,000 km²
+                "start_date": "2024-01-01T00:00:00",
+                "end_date": "2024-06-30T00:00:00",
+                "algorithm": "lisa"
+            })
         assert response.status_code == 422
-        # Area validation happens in Pydantic
+        assert "area too large" in response.json()["detail"][0]["msg"].lower()
+        repo.create.assert_not_called()
     
     def test_end_date_before_start_date(self, client):
         response = client.post("/analyze", json={
@@ -162,8 +166,13 @@ class TestJobManagement:
         assert "Invalid job ID" in response.json()["detail"]
     
     def test_job_not_found(self, client):
-        response = client.get("/jobs/00000000-0000-0000-0000-000000000000")
+        # The lookup itself needs the database; stub the repository so this
+        # tests the "no such job -> 404" mapping without one.
+        with patch("eo_brain.api.main.job_repo") as repo:
+            repo.get.return_value = None
+            response = client.get("/jobs/00000000-0000-0000-0000-000000000000")
         assert response.status_code == 404
+        repo.get.assert_called_once()
     
     def test_delete_invalid_job_id(self, client):
         response = client.delete("/jobs/invalid")

@@ -34,7 +34,7 @@ from eo_brain.core.datacube import (
 )
 from eo_brain.algorithms.base import get_algorithm, ALGORITHMS
 from eo_brain.db.database import job_repo, get_connection, close_pool
-from eo_brain.api.tiles import router as tiles_router
+from eo_brain.api.tiles import router as tiles_router, tile_query_for_algorithm
 from eo_brain.api.vectors import router as vectors_router
 from eo_brain.api.cog import save_severity_cog, cleanup_job_cogs, save_ndvi_cog, save_water_cog
 from eo_brain.algorithms.vectorize import vectorize_cog, VectorizeConfig
@@ -197,6 +197,13 @@ class AnalysisRequest(BaseModel):
             raise ValueError("south must be < north")
         if not (-90 <= south <= 90 and -90 <= north <= 90):
             raise ValueError("latitude must be in [-90, 90]")
+        # The limit advertised by GET / (MAX_AREA_KM2) is enforced here, so an
+        # oversized request is rejected with 422 before a job row is created.
+        area = estimate_bbox_area_km2(v)
+        if area > settings.max_area_km2:
+            raise ValueError(
+                f"area too large: {area:.0f} km2 (limit: {settings.max_area_km2:.0f} km2)"
+            )
         return v
 
     @field_validator('end_date')
@@ -250,18 +257,11 @@ class ChatResponse(BaseModel):
 
 # --- Shared Helpers ---
 
-def _get_colormap_for_algorithm(algorithm: str) -> str:
-    return {"ndwi": "water", "mndwi": "water", "ndvi": "ndvi",
-            "flood": "flood", "lisa": "severity"}.get(algorithm, "severity")
-
-
 def _build_tile_url(job_id: str, algorithm: str) -> str:
+    # Colormap and rescale come from the tile server's per-algorithm defaults,
+    # the same ones it applies to a request without query parameters.
     base_url = f"{settings.api_base_url}/tiles/{job_id}/{{z}}/{{x}}/{{y}}.png"
-    colormap = _get_colormap_for_algorithm(algorithm)
-    if algorithm in CONTINUOUS_OUTPUT_ALGORITHMS:
-        rescale = "-0.3,0.8" if algorithm in {"ndwi", "mndwi"} else "-0.1,0.8"
-        return f"{base_url}?colormap={colormap}&rescale={rescale}&tilesize=512"
-    return f"{base_url}?colormap={colormap}&tilesize=512"
+    return f"{base_url}?{tile_query_for_algorithm(algorithm)}"
 
 
 def _calculate_stats_from_cog(cog_path: str) -> Dict[str, Any]:

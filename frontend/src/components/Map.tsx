@@ -21,6 +21,73 @@ const SEVERITY_COLORS: Record<number, string> = {
 
 type DrawMode = 'simple_select' | 'draw_polygon';
 
+// --- Basemaps -------------------------------------------------------------
+// Both providers require attribution that stays visible on the map: the OSM tile
+// policy says not to hide it "behind toggles", Esri wants the data sources
+// "always visible". MapLibre's attribution control (bottom-right) lists the
+// attribution of the visible sources; it is created with `compact: false`
+// because MapLibre 4's default (`compact: true`) collapses it to an (i) button
+// as soon as the map is dragged.
+
+// OpenStreetMap standard tiles (default). The tile usage policy asks for
+// "© OpenStreetMap contributors" with "OpenStreetMap" linking to the copyright page:
+// https://operations.osmfoundation.org/policies/tiles/
+const OSM_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors';
+
+// Esri World Imagery (opt-in: hidden until the user switches to it, so a default
+// page load makes no request to Esri). For MapLibre, Esri asks for "Powered by
+// Esri" plus the service's own `copyrightText`, read from the service metadata
+// because the list of data providers changes:
+// https://developers.arcgis.com/documentation/esri-and-data-attribution/interactive-maps/
+const ESRI_IMAGERY_SERVICE = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer';
+// The service's copyrightText as read on 2026-11-26; replaced by the live value
+// the first time the layer is shown.
+const ESRI_IMAGERY_COPYRIGHT_FALLBACK = 'Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community';
+
+type BaseLayer = 'osm' | 'esri';
+const DEFAULT_BASE_LAYER: BaseLayer = 'osm';
+const BASE_LAYERS: Record<BaseLayer, { label: string; layerId: string }> = {
+  osm: { label: 'OSM', layerId: 'osm-layer' },
+  esri: { label: 'Esri', layerId: 'esri-imagery-layer' },
+};
+const BASE_LAYER_ORDER: BaseLayer[] = ['osm', 'esri'];
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
+
+function esriImagerySource(copyrightText: string): maplibregl.RasterSourceSpecification {
+  return {
+    type: 'raster',
+    tiles: [`${ESRI_IMAGERY_SERVICE}/tile/{z}/{y}/{x}`],
+    tileSize: 256,
+    attribution:
+      'Powered by <a href="https://www.esri.com" target="_blank" rel="noopener noreferrer">Esri</a> | ' +
+      escapeHtml(copyrightText),
+  };
+}
+
+/**
+ * Replace the fallback Esri attribution with the service's live copyrightText.
+ * A source's attribution cannot be changed in place, so the source is re-added
+ * (at the bottom of the stack, keeping its visibility). On failure the fallback stays.
+ */
+function refreshEsriAttribution(m: maplibregl.Map, signal: AbortSignal): void {
+  fetch(`${ESRI_IMAGERY_SERVICE}?f=json`, { signal })
+    .then(r => (r.ok ? r.json() : null))
+    .then((info: { copyrightText?: unknown } | null) => {
+      const text = typeof info?.copyrightText === 'string' ? info.copyrightText.trim() : '';
+      if (!text || text === ESRI_IMAGERY_COPYRIGHT_FALLBACK || !m.getLayer('esri-imagery-layer')) return;
+      const visibility = (m.getLayoutProperty('esri-imagery-layer', 'visibility') ?? 'visible') as 'visible' | 'none';
+      m.removeLayer('esri-imagery-layer');
+      m.removeSource('esri-imagery');
+      m.addSource('esri-imagery', esriImagerySource(text));
+      m.addLayer({ id: 'esri-imagery-layer', type: 'raster', source: 'esri-imagery', layout: { visibility } }, 'osm-layer');
+    })
+    .catch(() => { /* keep the fallback attribution */ });
+}
+
 export function Map({
   center = [12.5, 41.9],
   zoom = 10,
@@ -33,7 +100,9 @@ export function Map({
   const map = useRef<maplibregl.Map | null>(null);
   const draw = useRef<MapboxDraw | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
-  const [baseLayer, setBaseLayer] = useState<'satellite' | 'google' | 'osm'>('google');
+  const [baseLayer, setBaseLayer] = useState<BaseLayer>(DEFAULT_BASE_LAYER);
+  // Set once the Esri metadata request has been started (first time Esri is shown).
+  const esriMeta = useRef<AbortController | null>(null);
   const [drawMode, setDrawMode] = useState<DrawMode>('simple_select');
   const [hasSelection, setHasSelection] = useState(false);
 
@@ -46,36 +115,43 @@ export function Map({
       style: {
         version: 8,
         sources: {
-          'esri-satellite': {
-            type: 'raster',
-            tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
-            tileSize: 256,
-            attribution: '&copy; Esri'
-          },
-          'google-satellite': {
-            type: 'raster',
-            tiles: ['https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}'],
-            tileSize: 256,
-            attribution: '&copy; Google'
-          },
+          'esri-imagery': esriImagerySource(ESRI_IMAGERY_COPYRIGHT_FALLBACK),
           'osm': {
             type: 'raster',
             tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
             tileSize: 256,
-            attribution: '&copy; OpenStreetMap'
+            attribution: OSM_ATTRIBUTION
           }
         },
+        // Only the default base layer is visible; MapLibre requests no tiles
+        // for a source whose layers are all hidden.
         layers: [
-          { id: 'esri-satellite-layer', type: 'raster', source: 'esri-satellite', layout: { visibility: 'none' } },
-          { id: 'google-satellite-layer', type: 'raster', source: 'google-satellite' },
-          { id: 'osm-layer', type: 'raster', source: 'osm', layout: { visibility: 'none' } }
+          {
+            id: 'esri-imagery-layer', type: 'raster', source: 'esri-imagery',
+            layout: { visibility: DEFAULT_BASE_LAYER === 'esri' ? 'visible' : 'none' }
+          },
+          {
+            id: 'osm-layer', type: 'raster', source: 'osm',
+            layout: { visibility: DEFAULT_BASE_LAYER === 'osm' ? 'visible' : 'none' }
+          }
         ]
       },
       center: center,
-      zoom: zoom
+      zoom: zoom,
+      attributionControl: {
+        compact: false,
+        customAttribution: '<a href="https://maplibre.org/" target="_blank" rel="noopener noreferrer">MapLibre</a>'
+      }
     });
 
     m.addControl(new maplibregl.NavigationControl(), 'top-left');
+
+    if (DEFAULT_BASE_LAYER === 'esri') {
+      m.once('load', () => {
+        esriMeta.current = new AbortController();
+        refreshEsriAttribution(m, esriMeta.current.signal);
+      });
+    }
 
     const drawCtrl = new MapboxDraw({
       displayControlsDefault: false,
@@ -129,6 +205,8 @@ export function Map({
     map.current = m;
 
     return () => {
+      esriMeta.current?.abort();
+      esriMeta.current = null;
       m.remove();
       map.current = null;
       draw.current = null;
@@ -189,14 +267,19 @@ export function Map({
 
   const cycleBaseLayer = useCallback(() => {
     if (!map.current) return;
-    const order: Array<'google' | 'satellite' | 'osm'> = ['google', 'satellite', 'osm'];
-    const currentIdx = order.indexOf(baseLayer);
-    const newBase = order[(currentIdx + 1) % order.length];
+    const currentIdx = BASE_LAYER_ORDER.indexOf(baseLayer);
+    const newBase = BASE_LAYER_ORDER[(currentIdx + 1) % BASE_LAYER_ORDER.length];
     setBaseLayer(newBase);
 
-    map.current.setLayoutProperty('google-satellite-layer', 'visibility', newBase === 'google' ? 'visible' : 'none');
-    map.current.setLayoutProperty('esri-satellite-layer', 'visibility', newBase === 'satellite' ? 'visible' : 'none');
-    map.current.setLayoutProperty('osm-layer', 'visibility', newBase === 'osm' ? 'visible' : 'none');
+    for (const key of BASE_LAYER_ORDER) {
+      map.current.setLayoutProperty(BASE_LAYERS[key].layerId, 'visibility', key === newBase ? 'visible' : 'none');
+    }
+
+    // First time Esri is shown: fetch its live attribution (once per map).
+    if (newBase === 'esri' && !esriMeta.current) {
+      esriMeta.current = new AbortController();
+      refreshEsriAttribution(map.current, esriMeta.current.signal);
+    }
   }, [baseLayer]);
 
   // Sync result layers with map
@@ -350,7 +433,7 @@ export function Map({
           onClick={cycleBaseLayer}
           className="bg-white px-3 py-1.5 rounded-lg shadow-md text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
         >
-          {baseLayer === 'google' ? 'Google' : baseLayer === 'satellite' ? 'Esri' : 'OSM'}
+          {BASE_LAYERS[baseLayer].label}
         </button>
       </div>
 

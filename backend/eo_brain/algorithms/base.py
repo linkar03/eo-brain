@@ -176,6 +176,12 @@ class LISAAlgorithm(Algorithm):
     """
     Local Indicators of Spatial Association (Anselin 1995).
     Detects spatial outliers (Q3=HL, Q4=LH) via Local Moran's I.
+
+    Only vegetated pixels (NDVI >= bio_gate) enter the statistics: the global
+    mean/std and each pixel's spatial lag are computed over vegetated pixels
+    only, so an outlier means "unusual relative to the surrounding vegetation".
+    Non-vegetated and nodata pixels get z_score/spatial_lag NaN and are never
+    classified.
     """
 
     name = "lisa"
@@ -195,14 +201,23 @@ class LISAAlgorithm(Algorithm):
         ndvi = self._compute_ndvi(ds)
         ndvi = self._ensure_2d(ndvi, method="median")
 
-        global_mean = ndvi.mean(skipna=True)
-        global_std = ndvi.std(skipna=True)
+        # Bio gate FIRST: only vegetated pixels (NDVI >= bio_gate) take part.
+        # A non-vegetated pixel (bare soil, water, built-up; also NaN) is
+        # neither an outlier nor part of a vegetated pixel's context. Gating
+        # only the output, after the statistics, let bare ground pull the
+        # global mean down and fill the neighbourhood, so a vegetated pixel
+        # surrounded by bare ground came out as a "high outlier".
+        veg = ndvi >= cfg.bio_gate
+        ndvi_veg = ndvi.where(veg)
+
+        global_mean = ndvi_veg.mean(skipna=True)
+        global_std = ndvi_veg.std(skipna=True)
 
         # Floor std to prevent division-by-zero in homogeneous areas
         std_safe = xr.where(global_std > 0.01, global_std, 0.01)
-        z_score = (ndvi - global_mean) / std_safe
+        z_score = (ndvi_veg - global_mean) / std_safe
 
-        # Replace NaN z-scores with 0 so convolution doesn't propagate holes
+        # Excluded pixels contribute 0 to the convolution sums...
         z_clean = z_score.fillna(0)
 
         neighborhood_px = max(3, cfg.neighborhood_m // cfg.resolution_m)
@@ -212,7 +227,13 @@ class LISAAlgorithm(Algorithm):
         kernel[neighborhood_px, neighborhood_px] = 0
         kernel /= kernel.sum()
 
-        spatial_lag = self._safe_convolve(z_clean, kernel, depth=neighborhood_px)
+        # ...and the lag is the mean z over the VEGETATED neighbours only
+        # (normalised convolution). No vegetated neighbour -> no lag -> the
+        # pixel is not classified.
+        lag_sum = self._safe_convolve(z_clean, kernel, depth=neighborhood_px)
+        veg_share = self._safe_convolve(veg.astype(np.float32), kernel, depth=neighborhood_px)
+        spatial_lag = lag_sum / veg_share.where(veg_share > 1e-6)
+        classified = veg & spatial_lag.notnull()
 
         # Moran quadrant classification
         z_pos = z_clean > 0
@@ -223,25 +244,17 @@ class LISAAlgorithm(Algorithm):
         quadrant = xr.where(~z_pos & ~lag_pos, MoranQuadrant.LL, quadrant)
         quadrant = xr.where(z_pos & ~lag_pos, MoranQuadrant.HL, quadrant)
         quadrant = xr.where(~z_pos & lag_pos, MoranQuadrant.LH, quadrant)
+        quadrant = xr.where(classified, quadrant, MoranQuadrant.NONE)
 
         is_outlier = (quadrant == MoranQuadrant.HL) | (quadrant == MoranQuadrant.LH)
 
         abs_z = np.abs(z_clean)
         severity = xr.full_like(z_score, Severity.NONE, dtype=np.int8)
 
-        classifiable = is_outlier & (abs_z >= cfg.z_min_significance)
+        classifiable = classified & is_outlier & (abs_z >= cfg.z_min_significance)
         severity = xr.where(classifiable & (abs_z >= cfg.z_watch), Severity.WATCH, severity)
         severity = xr.where(classifiable & (abs_z >= cfg.z_suspect), Severity.SUSPECT, severity)
         severity = xr.where(classifiable & (abs_z >= cfg.z_alert), Severity.ALERT, severity)
-
-        # Gate on actual vegetation presence
-        veg_mask = ndvi >= cfg.bio_gate
-        severity = xr.where(veg_mask, severity, Severity.NONE)
-        quadrant = xr.where(veg_mask, quadrant, MoranQuadrant.NONE)
-
-        # Mask originally-invalid pixels back to NaN (they were filled for convolution)
-        nan_mask = np.isnan(ndvi)
-        severity = xr.where(~nan_mask, severity, Severity.NONE)
 
         return AlgorithmResult(
             data=xr.Dataset({

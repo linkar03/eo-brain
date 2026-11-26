@@ -1,8 +1,17 @@
 """
-Tile server endpoints using rio-tiler.
+Tile server endpoints using rio-tiler (>= 7.0, see requirements.txt).
 
 Colormaps are pre-built as NumPy LUTs (256x4 uint8) for O(1) rendering.
 Discrete maps use direct index lookup, continuous maps normalize then LUT.
+
+A request that names no colormap is rendered with the defaults of the
+algorithm that produced the COG (``ALGORITHM_COLORMAP``; the algorithm is
+stored in the COG as the ``EO_BRAIN_ALGORITHM`` tag by ``api.cog``). The
+tile URL a job returns (``api.main._build_tile_url``) spells out the same
+defaults, so both render identically.
+
+The endpoints are plain ``def`` on purpose: FastAPI runs them in its thread
+pool, so blocking raster reads do not stall the event loop.
 """
 
 import os
@@ -14,12 +23,22 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Response
 from PIL import Image
 
+from rasterio.crs import CRS
 from rio_tiler.io import Reader
 from rio_tiler.errors import TileOutsideBounds
+from rio_tiler.models import ImageData
+
+from eo_brain.api.cog import ALGORITHM_TAG  # the algorithm that produced the COG
 
 router = APIRouter(prefix="/tiles", tags=["tiles"])
 
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./output"))
+
+WGS84 = CRS.from_epsg(4326)
+
+# Continuous outputs are rendered with bilinear resampling and a 2 px buffer
+# (cropped again before encoding); discrete ones with nearest and no buffer.
+_CONTINUOUS_BUFFER = 2
 
 
 def _build_lut(mapping: Dict[int, Tuple[int, int, int, int]]) -> np.ndarray:
@@ -117,47 +136,124 @@ _COLORMAPS = {
     "water":    (_WATER_LUT, (-0.3, 0.8), False),
 }
 
+# Default colormap per algorithm (its rescale range is the colormap's default).
+ALGORITHM_COLORMAP: Dict[str, str] = {
+    "ndvi": "ndvi",
+    "ndwi": "water",
+    "mndwi": "water",
+    "flood": "flood",
+    "lisa": "severity",
+}
+
+
+def default_rendering(
+    algorithm: Optional[str], dtype: Optional[str] = None
+) -> Tuple[str, Optional[Tuple[float, float]]]:
+    """
+    Colormap name and rescale range for a request that names no colormap.
+
+    Known algorithm -> its colormap. Otherwise (a COG without the algorithm
+    tag) the data type decides: floating point -> "ndvi", integer -> "severity".
+    """
+    name = ALGORITHM_COLORMAP.get(algorithm or "")
+    if name is None:
+        is_float = dtype is not None and np.issubdtype(np.dtype(dtype), np.floating)
+        name = "ndvi" if is_float else "severity"
+    return name, _COLORMAPS[name][1]
+
+
+def tile_query_for_algorithm(algorithm: str) -> str:
+    """Query string of the tile URL returned for a job (same defaults as above)."""
+    name, rescale = default_rendering(algorithm)
+    query = f"colormap={name}"
+    if rescale:
+        query += f"&rescale={rescale[0]:g},{rescale[1]:g}"
+    return query + "&tilesize=512"
+
 
 def _get_colormap(name: str):
     """Lookup colormap config, fallback to NDVI."""
     return _COLORMAPS.get(name.lower(), (_NDVI_LUT, (-0.2, 0.8), False))
 
 
-def _apply_discrete(data: np.ndarray, mask: np.ndarray, lut: np.ndarray) -> np.ndarray:
+def _parse_rescale(rescale: Optional[str]) -> Optional[Tuple[float, float]]:
+    """'vmin,vmax' -> (vmin, vmax); None if not given. Malformed -> HTTP 422."""
+    if rescale is None:
+        return None
+    try:
+        vmin, vmax = (float(v) for v in rescale.split(","))
+    except ValueError:
+        raise HTTPException(422, f"rescale must be 'min,max', got {rescale!r}")
+    return vmin, vmax
+
+
+def _resolve_rendering(src: Reader, colormap: Optional[str], rescale: Optional[str]):
+    """(lut, (vmin, vmax), is_discrete) for this request and COG."""
+    user_range = _parse_rescale(rescale)
+    if colormap is None:
+        algorithm = src.dataset.tags().get(ALGORITHM_TAG)
+        colormap, _ = default_rendering(algorithm, src.dataset.dtypes[0])
+    lut, default_rescale, is_discrete = _get_colormap(colormap)
+    vrange = user_range or default_rescale or (-0.2, 0.8)
+    return lut, vrange, is_discrete
+
+
+def _first_band(img: ImageData) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    First band and its validity (True = data).
+
+    Read from the masked array (``ImageData.array``). Since rio-tiler 9,
+    ``ImageData.mask`` holds the data type's min/max instead of 0/255, so for a
+    float32 raster ``mask == 0`` never finds the nodata pixels.
+    """
+    band = img.array[0]
+    return np.ma.getdata(band), ~np.ma.getmaskarray(band)
+
+
+def _apply_discrete(data: np.ndarray, valid: np.ndarray, lut: np.ndarray) -> np.ndarray:
     """Single LUT lookup for discrete severity values."""
-    indices = data.astype(np.uint8)
+    indices = np.nan_to_num(data, nan=0).astype(np.uint8)
     rgba = lut[indices]
-    rgba[mask == 0, 3] = 0
+    rgba[~valid, 3] = 0
     return rgba
 
 
 def _apply_continuous(
     data: np.ndarray,
-    mask: np.ndarray,
+    valid: np.ndarray,
     vmin: float,
     vmax: float,
     lut: np.ndarray
 ) -> np.ndarray:
     """Normalize to 1-255 range, then single LUT lookup. 0 = nodata."""
     range_val = max(vmax - vmin, 1e-10)
-    normalized = np.clip((data - vmin) / range_val, 0, 1)
-    scaled = (normalized * 254 + 1).astype(np.uint8)
-    scaled[mask == 0] = 0
-    scaled[np.isnan(data)] = 0
+    with np.errstate(invalid="ignore"):
+        normalized = np.clip((data - vmin) / range_val, 0, 1)
+    nodata = ~valid | np.isnan(data)
+    scaled = (np.nan_to_num(normalized, nan=0) * 254 + 1).astype(np.uint8)
+    scaled[nodata] = 0
     return lut[scaled]
 
 
-def _render_png(rgba: np.ndarray, tilesize: int) -> bytes:
-    """RGBA array -> PNG bytes, with optional downscale to 256."""
-    img = Image.fromarray(rgba, mode="RGBA")
-    if tilesize != 256:
-        img = img.resize((256, 256), Image.Resampling.LANCZOS)
+def _colorize(img: ImageData, lut: np.ndarray, vrange, is_discrete: bool) -> np.ndarray:
+    data, valid = _first_band(img)
+    if is_discrete:
+        return _apply_discrete(data, valid, lut)
+    return _apply_continuous(data, valid, vrange[0], vrange[1], lut)
+
+
+def _render_png(rgba: np.ndarray, size: Optional[int] = 256, discrete: bool = False) -> bytes:
+    """RGBA array -> PNG bytes, resized to size x size (None = keep the size)."""
+    img = Image.fromarray(rgba)
+    if size is not None and img.size != (size, size):
+        resample = Image.Resampling.NEAREST if discrete else Image.Resampling.LANCZOS
+        img = img.resize((size, size), resample)
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
 
-_EMPTY_TILE = _render_png(np.zeros((256, 256, 4), dtype=np.uint8), 256)
+_EMPTY_TILE = _render_png(np.zeros((256, 256, 4), dtype=np.uint8))
 
 _TILE_HEADERS = {
     "Cache-Control": "public, max-age=3600",
@@ -170,36 +266,38 @@ def _cog_path(job_id: str) -> Path:
 
 
 @router.get("/{job_id}/info")
-async def get_tile_info(job_id: str):
+def get_tile_info(job_id: str):
+    """Raster metadata. ``bounds`` are in the raster's own CRS (``crs``)."""
     path = _cog_path(job_id)
     if not path.exists():
         raise HTTPException(404, f"COG not found for job {job_id}")
 
     try:
         with Reader(str(path)) as src:
-            info = src.info()
             return {
-                "bounds": info.bounds,
-                "crs": str(info.crs),
-                "width": info.width,
-                "height": info.height,
-                "minzoom": info.minzoom,
-                "maxzoom": info.maxzoom,
-                "dtype": str(info.dtype),
+                "bounds": list(src.bounds),
+                "crs": src.crs.to_string(),
+                "width": src.dataset.width,
+                "height": src.dataset.height,
+                "minzoom": src.minzoom,
+                "maxzoom": src.maxzoom,
+                "dtype": src.dataset.dtypes[0],
+                "algorithm": src.dataset.tags().get(ALGORITHM_TAG),
             }
     except Exception as e:
         raise HTTPException(500, f"Error reading COG: {e}")
 
 
 @router.get("/{job_id}/bounds")
-async def get_bounds(job_id: str):
+def get_bounds(job_id: str):
+    """Bounds in WGS84 (EPSG:4326) longitude/latitude, and their centre."""
     path = _cog_path(job_id)
     if not path.exists():
         raise HTTPException(404, f"COG not found for job {job_id}")
 
     try:
         with Reader(str(path)) as src:
-            bounds = src.geographic_bounds
+            bounds = src.get_geographic_bounds(WGS84)
             return {
                 "bounds": list(bounds),
                 "center": [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2]
@@ -209,14 +307,14 @@ async def get_bounds(job_id: str):
 
 
 @router.get("/{job_id}/{z}/{x}/{y}.png")
-async def get_tile(
+def get_tile(
     job_id: str,
     z: int,
     x: int,
     y: int,
-    colormap: str = Query(default="severity"),
+    colormap: Optional[str] = Query(default=None, description="Default: the producing algorithm's colormap"),
     band: int = Query(default=1),
-    rescale: Optional[str] = Query(default=None),
+    rescale: Optional[str] = Query(default=None, description="'min,max'; default: the colormap's range"),
     tilesize: int = Query(default=512, ge=256, le=1024),
 ):
     path = _cog_path(job_id)
@@ -224,81 +322,53 @@ async def get_tile(
         raise HTTPException(404, f"COG not found for job {job_id}")
 
     try:
-        lut, default_rescale, is_discrete = _get_colormap(colormap)
-
         with Reader(str(path)) as src:
-            resampling = "nearest" if is_discrete else "bilinear"
+            lut, vrange, is_discrete = _resolve_rendering(src, colormap, rescale)
+            buffer = 0 if is_discrete else _CONTINUOUS_BUFFER
             tile = src.tile(
                 x, y, z,
                 indexes=band,
                 tilesize=tilesize,
-                buffer=0 if is_discrete else 2,
-                resampling_method=resampling,
+                buffer=buffer,
+                resampling_method="nearest" if is_discrete else "bilinear",
             )
-
-            data = tile.data[0]
-            mask = tile.mask
-
-            if is_discrete:
-                rgba = _apply_discrete(data, mask, lut)
-            else:
-                if rescale:
-                    try:
-                        vmin, vmax = map(float, rescale.split(","))
-                    except ValueError:
-                        vmin, vmax = default_rescale or (-0.2, 0.8)
-                else:
-                    vmin, vmax = default_rescale or (-0.2, 0.8)
-
-                rgba = _apply_continuous(data, mask, vmin, vmax, lut)
-
-            content = _render_png(rgba, tilesize)
+            rgba = _colorize(tile, lut, vrange, is_discrete)
+            if buffer:
+                rgba = rgba[buffer:-buffer, buffer:-buffer]
+            content = _render_png(rgba, 256, discrete=is_discrete)
             return Response(content=content, media_type="image/png", headers=_TILE_HEADERS)
 
     except TileOutsideBounds:
-        return Response(content=_EMPTY_TILE, media_type="image/png")
+        return Response(content=_EMPTY_TILE, media_type="image/png", headers=_TILE_HEADERS)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Tile generation error: {e}")
 
 
 @router.get("/{job_id}/preview.png")
-async def get_preview(
+def get_preview(
     job_id: str,
-    width: int = Query(default=800, le=2048),
-    height: int = Query(default=800, le=2048),
-    colormap: str = Query(default="severity"),
-    rescale: Optional[str] = Query(default=None),
+    width: int = Query(default=800, ge=16, le=2048),
+    height: int = Query(default=800, ge=16, le=2048),
+    colormap: Optional[str] = Query(default=None, description="Default: the producing algorithm's colormap"),
+    rescale: Optional[str] = Query(default=None, description="'min,max'; default: the colormap's range"),
 ):
     path = _cog_path(job_id)
     if not path.exists():
         raise HTTPException(404, f"COG not found for job {job_id}")
 
     try:
-        lut, default_rescale, is_discrete = _get_colormap(colormap)
-
         with Reader(str(path)) as src:
-            resampling = "nearest" if is_discrete else "bilinear"
+            lut, vrange, is_discrete = _resolve_rendering(src, colormap, rescale)
             preview = src.preview(
                 max_size=max(width, height),
-                resampling_method=resampling,
+                resampling_method="nearest" if is_discrete else "bilinear",
             )
+            rgba = _colorize(preview, lut, vrange, is_discrete)
+            return Response(content=_render_png(rgba, None), media_type="image/png")
 
-            data = preview.data[0]
-            mask = preview.mask
-
-            if is_discrete:
-                rgba = _apply_discrete(data, mask, lut)
-            else:
-                if rescale:
-                    vmin, vmax = map(float, rescale.split(","))
-                else:
-                    vmin, vmax = default_rescale or (-0.2, 0.8)
-                rgba = _apply_continuous(data, mask, vmin, vmax, lut)
-
-            img = Image.fromarray(rgba, mode="RGBA")
-            buf = BytesIO()
-            img.save(buf, format="PNG")
-            return Response(content=buf.getvalue(), media_type="image/png")
-
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Preview generation error: {e}")
