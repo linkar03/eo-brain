@@ -17,6 +17,14 @@ Division of labour:
   * code decides everything else - alias resolution, range checks,
     geocoding, bbox/resolution rules, job creation, session context.
 
+Rejections come in two kinds (validators.ValidationError / NeedsUserError).
+After a job-creating call is rejected for a reason only the user can resolve
+(window too long, area outside the limits, no previous area, ...), no further
+job-creating call executes in the same request: it gets a deterministic
+refusal instead, so a model cannot turn "2 years" into a 365-day job by
+retrying. Model-fixable rejections (unknown alias, number format, a place the
+geocoder did not find) still allow a corrected retry.
+
 ``query_database`` hands a question to the data agent (data_agent.py), a
 separate text-to-SQL sub-agent with its own prompt, context, database role
 and a deterministic SQL gate. This loop only sees its bounded result.
@@ -67,6 +75,19 @@ _DEFAULT_DAYS_BACK = 30
 _PROVIDER_NAME = "element84-s2"
 
 _MAX_ROUNDS_TEXT = "Analysis request is being processed."
+
+# Tools that create a job. Only these are blocked after a needs-user rejection.
+JOB_TOOLS = frozenset({"launch_analysis", "rerun_with_different_algorithm"})
+_NEEDS_USER_ACTION = (
+    "Only the user can resolve this. Tell the user this limit and ask how they want to "
+    "proceed. Do not call launch_analysis or rerun_with_different_algorithm again in this "
+    "turn with other values, and do not start a different analysis instead."
+)
+_BLOCKED_ACTION = (
+    "NOT EXECUTED: an earlier call in this request was rejected for a reason only the user "
+    "can resolve (the error above), so no further analysis can be started in this turn. "
+    + _NEEDS_USER_ACTION
+)
 _NO_RESPONSE_TEXT = "No response from AI model."
 _UNAVAILABLE_TEXT = "AI service temporarily unavailable. Please retry in a minute."
 _NOT_CONFIGURED_TEXT = "AI agent is not configured. Set GEMINI_API_KEY."
@@ -82,6 +103,13 @@ def sanitize_input(text: str) -> str:
     return cleaned[:_MAX_INPUT_CHARS]
 
 
+def _rejection(message: str, *, needs_user: bool) -> Dict[str, Any]:
+    """Tool result for a rejected call. ``needs_user`` marks the kind only the user can resolve."""
+    if not needs_user:
+        return {"error": message}
+    return {"error": message, "needs_user": True, "action_required": _NEEDS_USER_ACTION}
+
+
 # -- Tool declarations (provider-neutral JSON Schema) --
 
 TOOL_SPECS: List[ToolSpec] = [
@@ -89,7 +117,9 @@ TOOL_SPECS: List[ToolSpec] = [
         name="launch_analysis",
         description=(
             "Geocode a location and create a satellite analysis job. "
-            "Call this whenever the user asks to analyze an area."
+            "Call this whenever the user asks to analyze an area with one of the "
+            "supported analyses (see algorithm). Pass what the user asked for; the "
+            "tool checks the limits and rejects what is outside them."
         ),
         parameters={
             "type": "object",
@@ -102,12 +132,19 @@ TOOL_SPECS: List[ToolSpec] = [
                     "type": "string",
                     "description": (
                         "Analysis type: ndvi, ndwi, mndwi, flood, lisa. "
-                        "Also accepts: vegetation, water, drought, anomaly."
+                        "Also accepts: vegetation, water, drought, anomaly. "
+                        "These are the only analyses: if the user asks for something "
+                        "else (traffic, weather, air quality, ...), do not call this tool."
                     ),
                 },
                 "days_back": {
                     "type": "integer",
-                    "description": "Temporal window in days (default 30, max 365)",
+                    "description": (
+                        "Temporal window in days, exactly as the user asked "
+                        "('last 3 months' = 90, 'last 2 years' = 730). Omit it when the "
+                        "user gives no window (default 30). Never shorten it to fit a "
+                        "limit: the tool checks the limit."
+                    ),
                 },
             },
             "required": ["location", "algorithm"],
@@ -180,13 +217,17 @@ CAPABILITIES:
   hectares per severity, overlaps, comparisons) with query_database
 
 RULES:
-1. When the user asks to analyze an area, ALWAYS call launch_analysis immediately. \
-   Never describe what you would do. Never ask for confirmation first.
+1. When the user asks to analyze an area with one of the analyses above, ALWAYS call \
+   launch_analysis immediately. Never describe what you would do. Never ask for confirmation first.
 2. If the user references the previous area ("same zone", "now water", "repeat"), \
    call rerun_with_different_algorithm.
-3. If a tool returns an error, relay the exact error message to the user as a helpful suggestion.
+3. If a tool returns an error, relay the exact error message to the user as a helpful suggestion. \
+   If the result has needs_user, only the user can resolve it: relay the limit and ask the user \
+   how to proceed. Do not retry with other values (a shorter window, another place, another analysis).
 4. NEVER fabricate job IDs, URLs, or analysis results. Only report data returned by tools.
-5. NEVER run analyses the user did not request.
+5. NEVER run analyses the user did not request. If the user asks for something the analyses above \
+   do not measure (traffic, weather, air quality, population, ...), say it is not supported and list \
+   what is supported; do not run a supported analysis in its place.
 6. After a successful tool call, briefly confirm what was launched and the estimated time.
 7. You understand Italian and English. Respond in the same language the user writes in.
 8. Default to Italian when the language is ambiguous (short commands, place names only).
@@ -194,7 +235,10 @@ RULES:
    and the rest as the location. Call launch_analysis immediately.
 10. The days_back parameter controls the temporal window. Default is 30 days. \
    If the user says "last 3 months" use days_back=90, "last year" use days_back=365, \
-   "last week" use days_back=7, etc. Always interpret temporal references.
+   "last week" use days_back=7, etc. Always interpret temporal references. \
+   Pass the window the user asked for even when it looks long ("last 2 years" = 730, \
+   "last 5 years" = 1825); never shorten it yourself. If it is over the limit the tool \
+   rejects it: tell the user the limit and ask which window they want.
 11. Route by intent: a request to analyze an area now -> launch_analysis. A question about \
    analyses that already exist (how many, how much area, which ones, compare, status history) \
    -> query_database with the question. Never launch an analysis to answer such a question.
@@ -226,6 +270,10 @@ class _RequestContext:
     last_launch: Optional[Dict[str, Any]] = None
     last_query: Optional[Any] = None  # DataAgentResult of the last successful query
     trace: List[ToolInvocation] = field(default_factory=list)
+    # Error text of the first job-creating call rejected for a reason only the
+    # user can resolve. Once set, job-creating calls are refused for the rest
+    # of this request (all rounds, and any retry or fallback model).
+    needs_user: Optional[str] = None
 
 
 @dataclass
@@ -312,20 +360,21 @@ class Agent:
             days_back = validate_temporal_range(days_back)
         except ValidationError as e:
             logger.warning(f"Validation failed: {e}")
-            return {"error": str(e)}
+            return _rejection(str(e), needs_user=e.needs_user)
 
         try:
             geo = self.geocode(location)
             logger.info(f"Geocoded '{location}' -> {geo.name} bbox={geo.bbox}")
         except ValueError as e:
+            # Model-fixable: the name may be misspelt or too vague.
             logger.warning(f"Geocoding failed: {e}")
-            return {"error": str(e)}
+            return _rejection(str(e), needs_user=False)
 
         try:
             bbox = validate_bbox(geo.to_list())
             algo = validate_algorithm_compatibility(algo)
         except ValidationError as e:
-            return {"error": str(e)}
+            return _rejection(str(e), needs_user=e.needs_user)
 
         try:
             resolution = resolve_resolution(bbox, requested=10)
@@ -423,13 +472,18 @@ class Agent:
     def _rerun_with_different_algorithm(
         self, ctx: _RequestContext, algorithm: str = ""
     ) -> Dict[str, Any]:
+        # No previous area: needs the user, because any place the model chose for
+        # a launch_analysis retry would be invented. (If the user did name a
+        # place in the same message, this also blocks that legitimate retry.)
         if not ctx.session_id:
-            return {"error": "No session context. Please specify a location."}
+            return _rejection("No session context. Please specify a location.", needs_user=True)
 
         session = self.sessions.get_or_create(ctx.session_id)
         last_location = session.get_context("last_location")
         if not last_location:
-            return {"error": "No previous analysis in this session. Specify a location."}
+            return _rejection(
+                "No previous analysis in this session. Specify a location.", needs_user=True
+            )
 
         algo = algorithm if algorithm else session.get_context("last_algorithm", "ndvi")
         return self._launch_analysis(ctx, location=last_location, algorithm=algo)
@@ -464,6 +518,16 @@ class Agent:
     ) -> Dict[str, Any]:
         """Dispatch a tool call and return the result dict. Never raises."""
         handler = self._dispatch.get(fn_name)
+        if fn_name in JOB_TOOLS and ctx.needs_user is not None:
+            # Deterministic refusal: the request already hit a limit only the
+            # user can lift, so a second launch would be a substituted request.
+            logger.warning(f"Blocked {fn_name}({fn_args}) after a needs-user rejection")
+            blocked = {
+                "error": ctx.needs_user, "needs_user": True, "blocked": True,
+                "action_required": _BLOCKED_ACTION,
+            }
+            ctx.trace.append(ToolInvocation(name=fn_name, args=dict(fn_args), result=blocked))
+            return blocked
         if not handler:
             logger.error(f"Unknown tool function: {fn_name}")
             result: Dict[str, Any] = {"error": f"Unknown function: {fn_name}"}
@@ -478,6 +542,8 @@ class Agent:
             except Exception as e:
                 logger.error(f"Tool {fn_name} threw: {e}", exc_info=True)
                 result = {"error": f"Internal error in {fn_name}: {e}"}
+        if fn_name in JOB_TOOLS and result.get("needs_user"):
+            ctx.needs_user = str(result.get("error", ""))
         ctx.trace.append(ToolInvocation(name=fn_name, args=dict(fn_args), result=result))
         return result
 
@@ -509,6 +575,10 @@ class Agent:
             messages.append(ToolResults(results=results))
 
         logger.warning("Exceeded max tool call rounds")
+        if ctx.needs_user is not None and not ctx.created_jobs:
+            # The model kept calling instead of answering; the limit it hit is
+            # the honest answer, not "being processed" (nothing is).
+            return ctx.needs_user
         return _MAX_ROUNDS_TEXT
 
     def _call_with_fallback(self, message: str, ctx: _RequestContext) -> tuple[str, str]:

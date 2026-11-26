@@ -203,5 +203,8 @@ class GeminiProvider:
         except Exception as exc:
             if _is_rate_limit(exc):
                 raise RateLimitError(str(exc), daily_quota=_is_daily_quota(exc)) from exc
-            raise ProviderError(f"{type(exc).__name__}: {exc}") from exc
+            status = getattr(exc, "code", None)
+            raise ProviderError(
+                f"{type(exc).__name__}: {exc}", status=status if isinstance(status, int) else None
+            ) from exc
         return self._turn(response)

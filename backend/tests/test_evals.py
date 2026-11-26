@@ -136,6 +136,61 @@ class TestDataset:
                 assert runner.scripted_steps(turn), case["id"]
 
 
+class TestGuardCases:
+    """The `guard` cases replay a misbehaving model; they must depend on the guard."""
+
+    def _run(self, case, gazetteer):
+        from eo_brain.agent.providers.scripted import ScriptedProvider
+
+        return runner.run_case(case, provider=ScriptedProvider([]), models=["m"],
+                               gazetteer=gazetteer, sleep=lambda _s: None)
+
+    def test_guard_cases_pass_with_the_guard_and_refusals_fail_without_it(self, monkeypatch):
+        from eo_brain.agent import brain
+
+        data = runner.load_dataset(runner.DEFAULT_CASES)
+        guard_cases = [c for c in data["cases"] if "guard" in c.get("tags", [])]
+        refusals = [c for c in guard_cases if c["expect"]["type"] == "refusal"]
+        counter = [c for c in guard_cases if c["expect"]["type"] == "tool_call"]
+        assert len(refusals) >= 3 and len(counter) >= 2
+
+        with_guard = {c["id"]: self._run(c, data["gazetteer"]) for c in guard_cases}
+        assert {i: r.outcome for i, r in with_guard.items()} == {c["id"]: "pass" for c in guard_cases}
+        assert all(with_guard[c["id"]].guard_blocked == 1 for c in refusals)
+        assert all(with_guard[c["id"]].guard_blocked == 0 for c in counter)
+
+        monkeypatch.setattr(brain, "JOB_TOOLS", frozenset())  # guard off
+        for c in refusals:
+            r = self._run(c, data["gazetteer"])
+            assert r.outcome == "fail" and r.job_created, c["id"]
+        for c in counter:  # the counter-cases never relied on the guard
+            assert self._run(c, data["gazetteer"]).outcome == "pass", c["id"]
+
+    def test_multi_round_script(self):
+        steps = runner.scripted_steps({"scripted": {"turns": [
+            {"calls": [{"tool": "list_capabilities"}]}, {"calls": [{"tool": "list_capabilities"}]},
+        ]}})
+        assert len(steps) == 3 and steps[-1] is runner.relay_tool_results
+        steps = runner.scripted_steps({"scripted": {"turns": [
+            {"calls": [{"tool": "list_capabilities"}]}, {"text": "done"},
+        ]}})
+        assert len(steps) == 2 and steps[-1].text == "done"
+
+    @pytest.mark.parametrize("turns", [[], [{"text": "a"}, {"calls": []}]])
+    def test_malformed_multi_round_script(self, turns):
+        with pytest.raises(ValueError, match="turns"):
+            runner.scripted_steps({"input": "x", "scripted": {"turns": turns}})
+
+    def test_call_log_records_blocked_calls(self):
+        blocked = ToolInvocation("launch_analysis", {"days_back": 365},
+                                 {"error": "limit", "needs_user": True, "blocked": True})
+        r = score_case({"id": "r", "expect": {"type": "refusal"}}, _result([_launch({}, job=False), blocked]))
+        assert r.passed and r.guard_blocked == 1
+        assert r.calls[1] == {"tool": "launch_analysis", "args": {"days_back": 365}, "job_id": None,
+                              "error": "limit", "needs_user": True, "blocked": True}
+        assert summarize([r])["guard_blocked_cases"] == 1
+
+
 class TestRunner:
     def test_scripted_run_writes_report(self, tmp_path, capsys):
         report = tmp_path / "r.json"

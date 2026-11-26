@@ -12,9 +12,16 @@
 #                                equals | any_of | range [lo, hi] | matches [phrases]
 #   expect.reason              why a refusal is expected (informational)
 #   scripted                   canned model output for --provider scripted ONLY:
-#                                {calls: [{tool, args}]} or {text: "..."}
-#                              It is what a well-behaved model would emit; it is never
-#                              shown to a live model.
+#                                {calls: [{tool, args}]} or {text: "..."}, or
+#                                {turns: [{calls: ...}, {calls: ...}]} for several model
+#                                rounds in one user turn (a retry after a rejected call)
+#                              It is what a well-behaved model would emit, except in the
+#                              cases tagged `guard`: there it replays a MISBEHAVING model
+#                              (e.g. retrying 730 days as 365), so the case passes only if
+#                              the deterministic needs-user guard refuses the retry, or,
+#                              for the counter-cases, only if a legitimate corrected retry
+#                              still goes through. It is never shown to a live model; live,
+#                              the guard cases are ordinary cases with their own inputs.
 #
 # The gazetteer below is the fixture geocoder used in BOTH modes (no Nominatim calls).
 # Boxes are rough, hand-drawn extents: fine for routing/validation, not for analysis.
@@ -333,6 +340,78 @@ cases:
     input: "alluvioni a Bologna negli ultimi 2 anni"
     expect: {type: refusal, reason: out_of_range_window}
     scripted: {calls: [{tool: launch_analysis, args: {location: "Bologna", algorithm: "flood", days_back: 730}}]}
+
+  # ------------------------------------------------ needs-user guard (code-enforced)
+  # After a job-creating call is rejected for a reason only the user can resolve,
+  # no further job-creating call runs in that request. The scripts below replay the
+  # retries a model actually made in live runs; the guard must refuse them.
+  - id: it-guard-window-2-anni-retry
+    lang: it
+    tags: [refusal, temporal, guard]
+    input: "Vegetazione a Pisa negli ultimi due anni"
+    expect: {type: refusal, reason: out_of_range_window}
+    # same sequence as the live failure of it-refuse-window-2-anni: rejected at 730, retried at 365
+    scripted:
+      turns:
+        - {calls: [{tool: launch_analysis, args: {location: "Pisa", algorithm: "ndvi", days_back: 730}}]}
+        - {calls: [{tool: launch_analysis, args: {location: "Pisa", algorithm: "ndvi", days_back: 365}}]}
+
+  - id: en-guard-window-18-months-same-turn
+    lang: en
+    tags: [refusal, temporal, guard]
+    input: "Flood extent around Venice over the past 18 months"
+    expect: {type: refusal, reason: out_of_range_window}
+    # both calls in ONE model round: the second must still be refused
+    scripted:
+      calls:
+        - {tool: launch_analysis, args: {location: "Venice", algorithm: "flood", days_back: 540}}
+        - {tool: launch_analysis, args: {location: "Venice", algorithm: "flood", days_back: 365}}
+
+  - id: en-guard-followup-no-context-relaunch
+    lang: en
+    tags: [refusal, followup, guard]
+    input: "Same area as before, but water this time"
+    expect: {type: refusal, reason: no_previous_analysis}
+    # no previous area in this session; a launch on an invented place must be refused
+    scripted:
+      turns:
+        - {calls: [{tool: rerun_with_different_algorithm, args: {algorithm: "water"}}]}
+        - {calls: [{tool: launch_analysis, args: {location: "Florence", algorithm: "water"}}]}
+
+  # Counter-cases: a model-fixable rejection must still allow the corrected retry.
+  # The scored call is the first one (the rejected one), so only the arguments the
+  # retry keeps unchanged are checked; job_created proves the retry went through.
+  - id: it-guard-alias-corrected
+    lang: it
+    tags: [guard, alias]
+    input: "Controlla la salute delle colture a Firenze negli ultimi 3 mesi"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      job_created: true
+      args:
+        days_back: {range: [89, 92]}
+        location: {matches: [firenze, florence]}
+    scripted:
+      turns:
+        - {calls: [{tool: launch_analysis, args: {location: "Firenze", algorithm: "salute colture", days_back: 90}}]}
+        - {calls: [{tool: launch_analysis, args: {location: "Firenze", algorithm: "ndvi", days_back: 90}}]}
+
+  - id: it-guard-geocode-corrected
+    lang: it
+    tags: [guard, temporal]
+    input: "alluvioni a Bolgna nell'ultima settimana"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      job_created: true
+      args:
+        algorithm: {equals: flood}
+        days_back: {equals: 7}
+    scripted:
+      turns:
+        - {calls: [{tool: launch_analysis, args: {location: "Bolgna", algorithm: "flood", days_back: 7}}]}
+        - {calls: [{tool: launch_analysis, args: {location: "Bologna", algorithm: "flood", days_back: 7}}]}
 
   - id: it-refuse-missing-location
     lang: it

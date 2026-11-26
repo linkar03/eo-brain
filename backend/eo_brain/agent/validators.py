@@ -4,6 +4,18 @@ eo_brain/agent/validators.py - Guardrails for agent tool inputs.
 Every tool parameter passes through validation before touching
 the DB or processing pipeline. Errors are human-readable so
 Gemini can relay them to the user as actionable suggestions.
+
+Every rejection is one of two kinds, and the agent loop treats them
+differently (see ``brain.Agent._execute_tool_call``):
+
+* ``ValidationError``  the model can fix it on its own: an alias it
+  spelled wrong, a number in the wrong format, a place name to correct.
+  A corrected retry in the same request is allowed.
+* ``NeedsUserError``   only the user can resolve it: the request is past
+  a limit (window too long, area too large or too small, ...). Any
+  value the model could retry with would be a different request from
+  the one the user made, so once one is raised no further job-creating
+  call runs in that request.
 """
 
 from __future__ import annotations
@@ -60,8 +72,23 @@ _ALGO_ALIASES = {
 
 
 class ValidationError(Exception):
-    """Raised with a user-friendly message the agent can relay."""
-    pass
+    """
+    Raised with a user-friendly message the agent can relay.
+
+    This base class is the kind the MODEL can fix with a corrected call.
+    """
+
+    needs_user = False
+
+
+class NeedsUserError(ValidationError):
+    """
+    A rejection only the USER can resolve: the request itself is outside
+    what the system does. The model must relay it and ask, not retry with
+    other values.
+    """
+
+    needs_user = True
 
 
 def resolve_algorithm(raw: str) -> str:
@@ -71,6 +98,10 @@ def resolve_algorithm(raw: str) -> str:
     resolved = _ALGO_ALIASES.get(key)
     if resolved:
         return resolved
+    # Model-fixable (a misspelt or unlisted alias), so a plain ValidationError.
+    # Code cannot tell that from a request for something no analysis measures
+    # (traffic, weather): not substituting a supported analysis for those is a
+    # system-prompt rule (brain.SYSTEM_PROMPT), not an enforced one.
     raise ValidationError(
         f"Unknown algorithm '{raw}'. Available: {', '.join(sorted(_ALLOWED_ALGORITHMS))}. "
         f"You can also say: vegetation, water, flood, drought."
@@ -90,7 +121,19 @@ def _lon_to_utm_zone(lon: float) -> int:
 
 
 def validate_bbox(bbox: List[float]) -> List[float]:
-    """Full bbox validation with actionable error messages."""
+    """
+    Full bbox validation with actionable error messages.
+
+    The bbox comes from the geocoder, never from the model. Two kinds:
+    * malformed geocoder output (wrong length, latitude out of range,
+      south >= north): plain ValidationError, treated like a failed
+      geocoding (the model may try a corrected place name). The real
+      geocoder cannot produce these: it always returns 4 values, clamps
+      latitudes and replaces zero-area boxes with a padded one;
+    * the extent of the area the user named is outside the limits
+      (anti-meridian, too narrow, too small, too large): NeedsUserError,
+      because any retry would analyse a different area.
+    """
     if len(bbox) != 4:
         raise ValidationError("BBox must have exactly 4 values: [west, south, east, north].")
 
@@ -110,25 +153,28 @@ def validate_bbox(bbox: List[float]) -> List[float]:
             f"Invalid bbox: south ({south}) >= north ({north}). Coordinates may be swapped."
         )
     if west >= east:
-        raise ValidationError(
+        raise NeedsUserError(
             f"Invalid bbox: west ({west}) >= east ({east}). "
             f"Anti-meridian crossing is not supported -- narrow the area."
         )
 
     if (east - west) < 0.001 or (north - south) < 0.001:
-        raise ValidationError(
+        raise NeedsUserError(
             "BBox is too narrow (< ~100m). The geocoder may have returned a point. "
             "Try a more specific area name or widen the search."
         )
 
     area = estimate_area_km2(bbox)
     if area > _MAX_AREA_KM2:
-        raise ValidationError(
+        # Reachable only with a geocoder that does not clamp: both the real
+        # geocoder and the eval stub shrink oversized boxes first
+        # (clamp_geocoder_bbox), which substitutes a smaller area silently.
+        raise NeedsUserError(
             f"Area too large: {area:.0f} km2 (limit: {_MAX_AREA_KM2} km2). "
             f"Try a smaller region or a specific city/district name."
         )
     if area < _MIN_AREA_KM2:
-        raise ValidationError(
+        raise NeedsUserError(
             f"Area too small: {area:.2f} km2 (minimum: {_MIN_AREA_KM2} km2). "
             f"Try zooming out or using a broader location name."
         )
@@ -145,9 +191,17 @@ def validate_bbox(bbox: List[float]) -> List[float]:
 
 
 def validate_location(raw) -> str:
-    """Location must be a non-empty place name of reasonable length."""
+    """
+    Location must be a non-empty place name of reasonable length.
+
+    Empty -> NeedsUserError: almost always the user named no place, and any
+    place the model filled in would be invented. (If the model merely dropped
+    a place the user did name, this blocks a legitimate retry; the user then
+    has to repeat the request.) Too long -> ValidationError: the model pasted
+    more than the place name and can shorten it.
+    """
     if not isinstance(raw, str) or not raw.strip():
-        raise ValidationError("Location is empty. Name a place, e.g. 'Florence, Italy'.")
+        raise NeedsUserError("Location is empty. Name a place, e.g. 'Florence, Italy'.")
     location = raw.strip()
     if len(location) > _MAX_LOCATION_CHARS:
         raise ValidationError(
@@ -173,11 +227,17 @@ def _as_whole_days(days_back) -> int:
 
 
 def validate_temporal_range(days_back) -> int:
+    """
+    Not a whole number, or < 1 -> ValidationError: a mapping mistake by the
+    model (e.g. "today" passed as 0), which it can correct. Over the maximum
+    -> NeedsUserError: the user asked for a longer window than the system
+    supports, and a shorter one is a different request.
+    """
     days_back = _as_whole_days(days_back)
     if days_back < _MIN_DAYS_BACK:
         raise ValidationError(f"days_back must be >= {_MIN_DAYS_BACK}.")
     if days_back > _MAX_DAYS_BACK:
-        raise ValidationError(
+        raise NeedsUserError(
             f"days_back={days_back} exceeds maximum ({_MAX_DAYS_BACK} days / ~1 year). "
             f"Satellite composites degrade over very long periods."
         )
@@ -203,8 +263,10 @@ def resolve_resolution(bbox: List[float], requested: int = 10) -> int:
 
 
 def validate_algorithm_compatibility(algorithm: str, provider: str = "element84-s2") -> str:
+    # NeedsUserError: running NDWI instead is a different analysis. Unreachable
+    # today (the agent always uses element84-s2).
     if algorithm == "mndwi" and provider not in ("element84-s2", "element84-landsat"):
-        raise ValidationError(
+        raise NeedsUserError(
             "MNDWI requires SWIR bands which may not be available with this provider. "
             "Try NDWI instead (uses NIR, available on all providers)."
         )

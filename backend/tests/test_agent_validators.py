@@ -5,6 +5,7 @@ import logging
 import pytest
 
 from eo_brain.agent.validators import (
+    NeedsUserError,
     ValidationError,
     clamp_geocoder_bbox,
     estimate_area_km2,
@@ -165,6 +166,56 @@ class TestCompatibility:
 
     def test_other_algorithms_pass(self):
         assert validate_algorithm_compatibility("ndvi", provider="other") == "ndvi"
+
+
+class TestRejectionKinds:
+    """
+    Which rejections only the user can resolve (NeedsUserError: the agent then
+    refuses any further job-creating call in the request) and which the model
+    may fix with a corrected retry (plain ValidationError).
+    """
+
+    @pytest.mark.parametrize(
+        "check",
+        [
+            lambda: validate_temporal_range(366),
+            lambda: validate_temporal_range(730),
+            lambda: validate_location(""),
+            lambda: validate_bbox([179.5, -17.0, -179.5, -16.0]),   # anti-meridian
+            lambda: validate_bbox([11.0, 43.0, 11.0005, 43.1]),     # too narrow
+            lambda: validate_bbox([11.0, 43.0, 11.002, 43.002]),    # too small
+            lambda: validate_bbox([0.0, 40.0, 10.0, 50.0]),         # too large
+            lambda: validate_algorithm_compatibility("mndwi", provider="other"),
+        ],
+        ids=["days-366", "days-730", "empty-location", "antimeridian", "too-narrow",
+             "too-small", "too-large", "mndwi-provider"],
+    )
+    def test_needs_user(self, check):
+        with pytest.raises(NeedsUserError) as exc:
+            check()
+        assert exc.value.needs_user is True
+        assert isinstance(exc.value, ValidationError)  # existing except clauses still catch it
+
+    @pytest.mark.parametrize(
+        "check",
+        [
+            lambda: resolve_algorithm("vegetation health"),
+            lambda: validate_temporal_range(0),
+            lambda: validate_temporal_range(90.5),
+            lambda: validate_temporal_range("three months"),
+            lambda: validate_location("x" * 201),
+            lambda: validate_bbox([1, 2, 3]),
+            lambda: validate_bbox([10, -95, 11, 45]),
+            lambda: validate_bbox([11.15, 43.83, 11.33, 43.72]),
+        ],
+        ids=["unknown-alias", "days-0", "days-fraction", "days-text", "location-too-long",
+             "bbox-length", "bbox-latitude", "bbox-swapped"],
+    )
+    def test_model_fixable(self, check):
+        with pytest.raises(ValidationError) as exc:
+            check()
+        assert not isinstance(exc.value, NeedsUserError)
+        assert exc.value.needs_user is False
 
 
 class TestClampGeocoderBBox:

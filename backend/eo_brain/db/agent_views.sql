@@ -9,6 +9,16 @@
 --
 -- Geometry columns are exposed only so spatial predicates can use them; the
 -- executor never returns geometry values to the model.
+--
+-- Closed-set columns (a fixed list of possible values) list them in their
+-- comment as "Values: <list>": text values in single quotes, exactly as the
+-- view returns them (case-sensitive, for = and IN), integer codes bare. Any
+-- explanation comes after the list and contains no quotes. The comments use
+-- dollar quoting ($$...$$) so the single quotes need no escaping.
+-- tests/test_db_view_values.py checks every list against what the view can
+-- produce: the view's own CASE mappings, the job_status enum, and the Python
+-- constants the writers use (algorithm registry, Severity, MoranQuadrant,
+-- DISCRETE_OUTPUT_ALGORITHMS).
 
 CREATE SCHEMA IF NOT EXISTS agent;
 COMMENT ON SCHEMA agent IS 'Read-only views over analysis jobs and their alert polygons, for the data agent.';
@@ -50,9 +60,12 @@ FROM public.jobs AS j;
 COMMENT ON VIEW agent.analyses IS
     'One row per satellite analysis job (requested area, algorithm, time window, status).';
 COMMENT ON COLUMN agent.analyses.analysis_id IS 'Unique id of the analysis (uuid).';
-COMMENT ON COLUMN agent.analyses.algorithm IS 'Algorithm code: ndvi, ndwi, mndwi, flood or lisa.';
-COMMENT ON COLUMN agent.analyses.algorithm_label IS 'Human-readable algorithm name.';
-COMMENT ON COLUMN agent.analyses.status IS 'pending, processing, completed or failed.';
+COMMENT ON COLUMN agent.analyses.algorithm IS
+    $$Algorithm code. Values: 'ndvi', 'ndwi', 'mndwi', 'flood', 'lisa'. Filter on this column, not on algorithm_label.$$;
+COMMENT ON COLUMN agent.analyses.algorithm_label IS
+    $$Display name of the algorithm. Values: 'vegetation index (NDVI)', 'water index (NDWI)', 'modified water index (MNDWI)', 'flood extent', 'vegetation anomalies (LISA)' (for ndvi, ndwi, mndwi, flood, lisa in that order). For display only.$$;
+COMMENT ON COLUMN agent.analyses.status IS
+    $$Processing state. Values: 'pending', 'processing', 'completed', 'failed'.$$;
 COMMENT ON COLUMN agent.analyses.location_name IS 'Place name the request was geocoded to; may be NULL. Match with ILIKE.';
 COMMENT ON COLUMN agent.analyses.resolution_m IS 'Processing resolution in metres.';
 COMMENT ON COLUMN agent.analyses.window_start IS 'Start of the satellite imagery time window.';
@@ -99,12 +112,16 @@ COMMENT ON VIEW agent.alert_areas IS
     'One row per alert polygon produced by a flood or lisa analysis (continuous indices like ndvi produce none).';
 COMMENT ON COLUMN agent.alert_areas.feature_id IS 'Unique id of the polygon.';
 COMMENT ON COLUMN agent.alert_areas.analysis_id IS 'Analysis that produced the polygon (agent.analyses.analysis_id).';
-COMMENT ON COLUMN agent.alert_areas.algorithm IS 'flood or lisa.';
-COMMENT ON COLUMN agent.alert_areas.severity IS 'Severity code: 1 = watch, 2 = suspect, 3 = alert.';
-COMMENT ON COLUMN agent.alert_areas.severity_label IS 'watch, suspect or alert.';
-COMMENT ON COLUMN agent.alert_areas.quadrant IS 'LISA only: Moran quadrant code 1-4; NULL for flood.';
+COMMENT ON COLUMN agent.alert_areas.algorithm IS
+    $$Algorithm that produced the polygon. Values: 'flood', 'lisa'.$$;
+COMMENT ON COLUMN agent.alert_areas.severity IS
+    $$Severity code. Values: 1, 2, 3 (1 = watch, 2 = suspect, 3 = alert; higher is more severe).$$;
+COMMENT ON COLUMN agent.alert_areas.severity_label IS
+    $$Severity name. Values: 'watch', 'suspect', 'alert' (severity 1, 2, 3).$$;
+COMMENT ON COLUMN agent.alert_areas.quadrant IS
+    $$LISA Moran quadrant code. Values: 1, 2, 3, 4 (1 = HH, 2 = LL, 3 = HL, 4 = LH, see quadrant_label). NULL for flood polygons and whenever no quadrant was recorded.$$;
 COMMENT ON COLUMN agent.alert_areas.quadrant_label IS
-    'LISA only: HH high cluster, LL low cluster, HL high outlier, LH low outlier.';
+    $$LISA Moran quadrant as a two-letter code. Values: 'HH', 'LL', 'HL', 'LH'. Meaning: HH = high cluster (high value among high neighbours), LL = low cluster, HL = high outlier (high value among low neighbours), LH = low outlier. NULL for flood polygons and whenever no quadrant was recorded.$$;
 COMMENT ON COLUMN agent.alert_areas.area_m2 IS 'Polygon area in square metres (computed in UTM).';
 COMMENT ON COLUMN agent.alert_areas.area_ha IS 'Polygon area in hectares.';
 COMMENT ON COLUMN agent.alert_areas.area_km2 IS 'Polygon area in square kilometres.';
@@ -139,11 +156,14 @@ GROUP BY f.job_id, j.algorithm, j.params ->> 'geocoded_name', j.created_at, f.se
 COMMENT ON VIEW agent.analysis_severity_summary IS
     'Alert polygons aggregated per analysis and severity. Severities with no polygons have no row (treat as 0).';
 COMMENT ON COLUMN agent.analysis_severity_summary.analysis_id IS 'Analysis id (agent.analyses.analysis_id).';
-COMMENT ON COLUMN agent.analysis_severity_summary.algorithm IS 'flood or lisa.';
+COMMENT ON COLUMN agent.analysis_severity_summary.algorithm IS
+    $$Algorithm of the analysis. Values: 'flood', 'lisa'.$$;
 COMMENT ON COLUMN agent.analysis_severity_summary.location_name IS 'Place name of the analysis.';
 COMMENT ON COLUMN agent.analysis_severity_summary.analysis_created_at IS 'created_at of the analysis.';
-COMMENT ON COLUMN agent.analysis_severity_summary.severity IS 'Severity code: 1 = watch, 2 = suspect, 3 = alert.';
-COMMENT ON COLUMN agent.analysis_severity_summary.severity_label IS 'watch, suspect or alert.';
+COMMENT ON COLUMN agent.analysis_severity_summary.severity IS
+    $$Severity code. Values: 1, 2, 3 (1 = watch, 2 = suspect, 3 = alert; higher is more severe).$$;
+COMMENT ON COLUMN agent.analysis_severity_summary.severity_label IS
+    $$Severity name. Values: 'watch', 'suspect', 'alert' (severity 1, 2, 3).$$;
 COMMENT ON COLUMN agent.analysis_severity_summary.feature_count IS 'Number of polygons.';
 COMMENT ON COLUMN agent.analysis_severity_summary.total_area_m2 IS 'Total polygon area in square metres.';
 COMMENT ON COLUMN agent.analysis_severity_summary.total_area_ha IS 'Total polygon area in hectares.';

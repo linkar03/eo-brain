@@ -21,6 +21,18 @@ Suites:
 gate and the read-only role. It is NOT a measure of model quality: by
 construction it only shows whether the plumbing turns ideal model output
 into the expected outcome.
+
+Live runs: a case whose model call failed is outcome "error" and is left out
+of every rate; once every model in the chain reports an exhausted daily
+quota the run stops and the remaining cases are "not run" (see
+evals/provider_guard.py). Each report says how many cases were answered and
+whether the run is ``complete``.
+
+Exit codes:
+  0  scripted: every case passed / live: run complete (every case answered)
+  1  scripted regression gate failed (some case is not a pass)
+  2  usage or configuration error (missing API key, missing database URL)
+  3  live run INCOMPLETE (some case errored or was not run): not a result
 """
 
 from __future__ import annotations
@@ -42,7 +54,14 @@ from eo_brain.agent.brain import Agent
 from eo_brain.agent.llm import ModelTurn, ToolCall
 from eo_brain.agent.providers.scripted import ScriptedProvider, relay_tool_results
 from eo_brain.agent.session import SessionStore
-from evals.scoring import CaseResult, score_case, summarize
+from evals.provider_guard import (
+    DEFAULT_CASE_RETRIES,
+    ProviderGuard,
+    one_line,
+    print_completeness,
+    run_cases,
+)
+from evals.scoring import CaseResult, errored_case, not_run_case, score_case, summarize
 from evals.stubs import FIXED_NOW, InMemoryJobRepository, StubDataAgent, StubGeocoder
 
 HERE = Path(__file__).resolve().parent
@@ -50,6 +69,11 @@ DEFAULT_CASES = HERE / "cases.v1.yaml"
 DEFAULT_SQL_CASES = HERE / "sql_cases.v1.yaml"
 DEFAULT_REPORT_DIR = HERE / "reports"
 SCRIPTED_MODEL = "scripted-replay"
+
+EXIT_OK = 0
+EXIT_REGRESSION = 1     # scripted: some case is not a pass
+EXIT_USAGE = 2
+EXIT_INCOMPLETE = 3     # live: some case errored or was not run
 
 SCRIPTED_BANNER = (
     "PROVIDER: scripted - replays canned tool calls stored in the case file.\n"
@@ -74,15 +98,38 @@ def load_dataset(path: Path) -> Dict[str, Any]:
     return data
 
 
+def _model_turn(step: Dict[str, Any]) -> ModelTurn:
+    if "calls" in step:
+        return ModelTurn(tool_calls=[
+            ToolCall(name=c["tool"], args=dict(c.get("args") or {})) for c in step["calls"]
+        ])
+    return ModelTurn(text=step.get("text", ""))
+
+
 def scripted_steps(turn: Dict[str, Any]) -> List[Any]:
-    """Canned model output for one user turn."""
+    """
+    Canned model output for one user turn:
+      {calls: [...]}            one round of tool calls, then relay the results as text
+      {text: "..."}             a text answer, no tool call
+      {turns: [{calls}, ...]}   several model rounds in the same user turn (e.g. a retry
+                                after a rejected call); ends with relay unless the last
+                                round is {text}
+    """
     script = turn.get("scripted")
     if script is None:
         raise ValueError(f"turn {turn.get('input')!r} has no 'scripted' reply")
+    if "turns" in script:
+        rounds = list(script["turns"])
+        if not rounds or any("calls" not in r for r in rounds[:-1]):
+            raise ValueError(f"turn {turn.get('input')!r}: 'turns' needs {{calls}} rounds, "
+                             f"optionally ending with one {{text}}")
+        steps: List[Any] = [_model_turn(r) for r in rounds]
+        if "calls" in rounds[-1]:
+            steps.append(relay_tool_results)
+        return steps
     if "calls" in script:
-        calls = [ToolCall(name=c["tool"], args=dict(c.get("args") or {})) for c in script["calls"]]
-        return [ModelTurn(tool_calls=calls), relay_tool_results]
-    return [ModelTurn(text=script.get("text", ""))]
+        return [_model_turn(script), relay_tool_results]
+    return [_model_turn(script)]
 
 
 def run_case(case: Dict[str, Any], *, provider, models: List[str], gazetteer, sleep) -> CaseResult:
@@ -104,6 +151,8 @@ def run_case(case: Dict[str, Any], *, provider, models: List[str], gazetteer, sl
 
     for setup in case.get("setup", []):
         res = agent.run(setup["input"], session_id)
+        if res.error:  # the model never answered the setup turn: nothing to score
+            return errored_case(case, res, during=f"setup turn {setup['input']!r}")
         if setup.get("expect_job", True) and res.job_id is None:
             return score_case(case, res, note=f"setup turn {setup['input']!r} created no job")
 
@@ -126,23 +175,33 @@ def print_table(results: List[CaseResult]) -> None:
         called = ",".join(r.called_tools) or "(none)"
         args = "-" if r.args_ok is None else ("ok" if r.args_ok else "FAIL")
         job = "yes" if r.job_created else "no"
-        verdict = "PASS" if r.passed else "FAIL"
+        verdict = r.outcome.upper().replace("_", " ")
+        if r.outcome in ("error", "not_run"):
+            called, args, job = "-", "-", "-"
         print(f"{r.id[:36]:<36} {r.lang:<4} {expected[:31]:<31} {called[:31]:<31} {args:<5} {job:<4} {verdict}")
-        if not r.passed:
+        if r.outcome == "error":
+            where = f", {r.note}" if r.note else ""
+            print(f"    -> no model answer ({r.error_reason or r.error_kind}{where}): {one_line(r.error)}")
+        elif r.outcome == "fail":
             bad = [k for k, ok in r.arg_checks.items() if not ok]
             detail = f"args failed: {bad} effective={r.effective_args}" if bad else ""
-            print(f"    -> {r.note or detail or r.tool_errors or r.reply_text[:120]}")
+            print(f"    -> {one_line(r.note or detail or r.tool_errors or r.reply_text)}")
+        if r.guard_blocked:
+            print(f"    -> needs-user guard refused {r.guard_blocked} job-creating call(s)")
 
 
-def print_summary(summary: Dict[str, Any]) -> None:
+def print_summary(summary: Dict[str, Any], stop_reason: Optional[str] = None) -> None:
     print()
-    print(f"cases passed            {summary['passed']}/{summary['cases']}")
+    print_completeness(summary, stop_reason)
+    print(f"cases passed            {summary['passed']}/{summary['answered']} answered")
     print(f"tool-selection accuracy {_fmt_rate(summary['tool_selection_accuracy'])}")
     print(f"argument accuracy       {_fmt_rate(summary['argument_accuracy'])}")
     print(f"correct-refusal rate    {_fmt_rate(summary['correct_refusal_rate'])}")
     print(f"routing accuracy        {_fmt_rate(summary['routing_accuracy'])}  (query_database vs launch_analysis)")
     print(f"false refusals          {summary['false_refusals']}")
-    print(f"errored cases           {summary['errored']}")
+    print(f"setup failures          {summary['setup_failures']}  (a setup turn was answered but created no job)")
+    print(f"needs-user guard fired  {summary['guard_blocked_cases']} case(s)  "
+          f"(a job-creating call was refused after a limit only the user can lift)")
 
 
 def _sha256(path: Path) -> str:
@@ -155,36 +214,62 @@ def _write_report(path: Path, report: Dict[str, Any]) -> None:
     print(f"\nreport: {path}")
 
 
-def run_tools_suite(args, provider, models, sleep, banner) -> bool:
+def _run_meta(args, models, banner, guard: Optional[ProviderGuard], summary, stop_reason, started) -> Dict[str, Any]:
+    live = args.provider != "scripted"
+    warning = None
+    if not summary["complete"]:
+        warning = (
+            f"INCOMPLETE RUN: only {summary['answered']} of {summary['cases']} cases have a scored answer "
+            f"({summary['errored']} errored, {summary['not_run']} not run). The rates cover the answered "
+            f"cases only and are NOT a result for the dataset."
+        )
+    return {
+        "provider": args.provider,
+        "models": models,
+        "measures_model_quality": live,
+        "complete": summary["complete"],
+        "counts": {k: summary[k] for k in ("cases", "answered", "errored", "not_run")},
+        "warning": warning,
+        "stopped_early": stop_reason,
+        "model_requests_sent": guard.requests_sent if guard is not None else None,
+        "daily_quota_exhausted": list(guard.exhausted) if guard is not None else [],
+        "note": banner,
+        "started_at": started.isoformat(),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def run_tools_suite(args, provider, models, sleep, banner, guard: Optional[ProviderGuard] = None) -> Dict[str, Any]:
     data = load_dataset(args.cases)
     cases = [c for c in data["cases"] if not args.only or c["id"] in args.only]
     print(banner)
     print(f"suite: tools - dataset: {args.cases.name} (version {data['version']}, {len(cases)} cases)\n")
 
     started = datetime.now(timezone.utc)
-    results = [
-        run_case(c, provider=provider, models=models, gazetteer=data["gazetteer"], sleep=sleep)
-        for c in cases
-    ]
+    results, stop_reason = run_cases(
+        cases,
+        lambda c: run_case(c, provider=provider, models=models, gazetteer=data["gazetteer"], sleep=sleep),
+        not_run=not_run_case,
+        guard=guard,
+        case_retries=args.case_retries if guard is not None else 0,
+        pause=sleep,
+    )
     summary = summarize(results)
     print_table(results)
-    print_summary(summary)
+    print_summary(summary, stop_reason)
 
     _write_report(args.report or DEFAULT_REPORT_DIR / f"{args.provider}.json", {
-        "schema": "agent-tool-call-eval-report/v1",
-        "provider": args.provider,
-        "models": models,
-        "measures_model_quality": args.provider != "scripted",
-        "note": banner,
+        "schema": "agent-tool-call-eval-report/v2",
+        **_run_meta(args, models, banner, guard, summary, stop_reason, started),
         "dataset": {"path": args.cases.name, "version": data["version"], "sha256": _sha256(args.cases)},
-        "started_at": started.isoformat(),
         "summary": summary,
         "cases": [r.to_dict() for r in results],
     })
-    return summary["passed"] == summary["cases"]
+    return summary
 
 
-def run_sql_suite_cli(args, provider, models, banner) -> Optional[bool]:
+def run_sql_suite_cli(args, provider, models, banner, guard: Optional[ProviderGuard] = None,
+                      sleep=time.sleep) -> Optional[Dict[str, Any]]:
     from evals import sql_suite
     from evals.db import create_scratch_db, drop_scratch_db, fingerprint
 
@@ -201,31 +286,40 @@ def run_sql_suite_cli(args, provider, models, banner) -> Optional[bool]:
           f"SYNTHETIC seed\n")
 
     started = datetime.now(timezone.utc)
-    db = create_scratch_db(admin_url, prefix="agent_eval")
-    try:
-        results = sql_suite.run_sql_suite(
-            cases, agent_dsn=db.agent_dsn, admin_dsn=db.admin_dsn,
-            provider=provider, models=models, fingerprint=fingerprint,
-        )
-    finally:
-        drop_scratch_db(admin_url, db)
+    if guard is not None and guard.all_exhausted:
+        # Nothing can be answered: do not even build the scratch database.
+        stop_reason = guard.stop_reason()
+        results = [sql_suite.not_run_sql_case(c, stop_reason) for c in cases]
+    else:
+        db = create_scratch_db(admin_url, prefix="agent_eval")
+        try:
+            results, stop_reason = sql_suite.run_sql_suite(
+                cases, agent_dsn=db.agent_dsn, admin_dsn=db.admin_dsn,
+                provider=provider, models=models, fingerprint=fingerprint,
+                guard=guard, case_retries=args.case_retries if guard is not None else 0, pause=sleep,
+            )
+        finally:
+            drop_scratch_db(admin_url, db)
     summary = sql_suite.summarize_sql(results)
     sql_suite.print_sql_table(results)
-    sql_suite.print_sql_summary(summary)
+    sql_suite.print_sql_summary(summary, stop_reason)
 
     _write_report(args.sql_report or DEFAULT_REPORT_DIR / f"{args.provider}-sql.json", {
-        "schema": "data-agent-sql-eval-report/v1",
-        "provider": args.provider,
-        "models": models,
-        "measures_model_quality": args.provider != "scripted",
-        "note": banner,
+        "schema": "data-agent-sql-eval-report/v2",
+        **_run_meta(args, models, banner, guard, summary, stop_reason, started),
         "dataset": {"path": args.sql_cases.name, "version": data["version"], "sha256": _sha256(args.sql_cases)},
         "seed": {"path": "fixtures/synthetic_seed.sql", "sha256": _sha256(HERE / "fixtures" / "synthetic_seed.sql")},
-        "started_at": started.isoformat(),
         "summary": summary,
         "cases": [r.to_dict() for r in results],
     })
-    return summary["passed"] == summary["cases"]
+    return summary
+
+
+def make_live_provider(args):
+    """(provider, models) for --provider gemini. Separate so tests can swap in a fake."""
+    from eo_brain.agent.providers.gemini import GeminiProvider, model_chain_from_env
+
+    return GeminiProvider(), (args.model or model_chain_from_env())
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -237,6 +331,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--admin-url", help="PostGIS superuser URL for the sql suite (default: $TEST_DATABASE_URL)")
     ap.add_argument("--model", action="append", help="model id (repeat for a fallback chain); gemini only")
     ap.add_argument("--only", action="append", default=[], help="run only these case ids")
+    ap.add_argument("--case-retries", type=int, default=DEFAULT_CASE_RETRIES,
+                    help="live only: re-runs of a case that errored on a transient provider failure "
+                         f"(5xx, timeout, per-minute 429), after a pause (default {DEFAULT_CASE_RETRIES}; 0 = off)")
     ap.add_argument("--report", type=Path, help="tool-suite JSON report (default: evals/reports/<provider>.json)")
     ap.add_argument("--sql-report", type=Path,
                     help="sql-suite JSON report (default: evals/reports/<provider>-sql.json)")
@@ -244,6 +341,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.CRITICAL)
 
+    guard: Optional[ProviderGuard] = None
     if args.provider == "scripted":
         provider: Any = ScriptedProvider([])
         models = [SCRIPTED_MODEL]
@@ -252,29 +350,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         if not os.environ.get("GEMINI_API_KEY"):
             print("--provider gemini needs GEMINI_API_KEY in the environment.", file=sys.stderr)
-            return 2
-        from eo_brain.agent.providers.gemini import GeminiProvider, model_chain_from_env
-
-        provider = GeminiProvider()
-        models = args.model or model_chain_from_env()
+            return EXIT_USAGE
+        live_provider, models = make_live_provider(args)
+        guard = provider = ProviderGuard(live_provider, models)
         sleep = time.sleep
         banner = LIVE_BANNER.format(provider=args.provider, models=", ".join(models))
 
-    all_passed = True
+    summaries: List[Dict[str, Any]] = []
     if args.suite in ("tools", "all"):
-        all_passed &= run_tools_suite(args, provider, models, sleep, banner)
+        summaries.append(run_tools_suite(args, provider, models, sleep, banner, guard))
     if args.suite in ("sql", "all"):
         if args.suite == "all":
             print("\n" + "=" * 100 + "\n")
-        ok = run_sql_suite_cli(args, provider, models, banner)
-        if ok is None:
-            return 2
-        all_passed &= ok
+        summary = run_sql_suite_cli(args, provider, models, banner, guard, sleep)
+        if summary is None:
+            return EXIT_USAGE
+        summaries.append(summary)
 
-    # Offline mode is a regression gate: every case must pass.
-    if args.provider == "scripted" and not all_passed:
-        return 1
-    return 0
+    if args.provider == "scripted":
+        # Offline mode is a regression gate: every case must pass.
+        return EXIT_OK if all(s["passed"] == s["cases"] for s in summaries) else EXIT_REGRESSION
+    if not all(s["complete"] for s in summaries):
+        print(f"\nexit {EXIT_INCOMPLETE}: the live run is INCOMPLETE - see the warning in the report(s).")
+        return EXIT_INCOMPLETE
+    return EXIT_OK
 
 
 if __name__ == "__main__":

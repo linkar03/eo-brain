@@ -27,6 +27,7 @@ from evals.stubs import FIXED_NOW, InMemoryJobRepository, StubGeocoder
 GAZETTEER = [
     {"name": "Firenze, Toscana, Italia", "aliases": ["firenze", "florence"], "bbox": [11.15, 43.72, 11.33, 43.83]},
     {"name": "Pisa, Toscana, Italia", "aliases": ["pisa"], "bbox": [10.33, 43.66, 10.48, 43.76]},
+    {"name": "Bologna, Emilia-Romagna, Italia", "aliases": ["bologna"], "bbox": [11.23, 44.42, 11.43, 44.56]},
 ]
 
 
@@ -189,6 +190,165 @@ def test_repository_failure_is_relayed():
     res = h.agent.run("x", "s1")
     assert res.text == "Failed to create job: db down"
     assert res.job_id is None
+
+
+# ---------------------------------------------------------------- needs-user guard
+#
+# After a job-creating call is rejected for a reason only the user can resolve,
+# no further job-creating call may execute in the same request.
+
+LIMIT_730 = "days_back=730 exceeds maximum"
+
+
+def test_window_rejected_at_730_then_retried_at_365_creates_no_job():
+    # The exact live sequence of eval case it-refuse-window-2-anni.
+    h = Harness([
+        call("launch_analysis", location="Bologna", algorithm="flood", days_back=730),
+        call("launch_analysis", location="Bologna", algorithm="flood", days_back=365),
+        relay_tool_results,
+    ])
+    res = h.agent.run("alluvioni a Bologna negli ultimi 2 anni", "s1")
+
+    assert h.repo.all() == [] and res.job_id is None
+    first, second = res.tool_calls
+    assert first.args["days_back"] == 730 and LIMIT_730 in first.result["error"]
+    assert first.result["needs_user"] is True and "Only the user" in first.result["action_required"]
+    assert second.args["days_back"] == 365
+    assert second.result["blocked"] is True and second.result["error"] == first.result["error"]
+    assert "NOT EXECUTED" in second.result["action_required"]
+    assert h.geocoder.queries == []  # the blocked call never reached the geocoder
+    [seen] = h.tool_results_seen(2)[1:]
+    assert seen.response["blocked"] is True  # the model is told why
+    assert LIMIT_730 in res.text
+
+
+def test_second_call_in_the_same_round_is_blocked():
+    h = Harness([
+        ModelTurn(tool_calls=[
+            ToolCall("launch_analysis", {"location": "Bologna", "algorithm": "flood", "days_back": 730}),
+            ToolCall("launch_analysis", {"location": "Bologna", "algorithm": "flood", "days_back": 365}),
+        ]),
+        relay_tool_results,
+    ])
+    res = h.agent.run("alluvioni a Bologna negli ultimi 2 anni", "s1")
+    assert h.repo.all() == [] and res.job_id is None
+    assert [c.result.get("blocked", False) for c in res.tool_calls] == [False, True]
+
+
+def test_rerun_is_blocked_too_after_a_needs_user_rejection():
+    h = Harness([
+        call("launch_analysis", location="Pisa", algorithm="flood"), relay_tool_results,
+        call("launch_analysis", location="Pisa", algorithm="ndvi", days_back=1825),
+        call("rerun_with_different_algorithm", algorithm="ndvi"),
+        relay_tool_results,
+    ])
+    h.agent.run("flood pisa", "s1")
+    res = h.agent.run("ndvi stessa zona ultimi 5 anni", "s1")
+    assert len(h.repo.all()) == 1 and res.job_id is None
+    assert res.tool_calls[1].name == "rerun_with_different_algorithm"
+    assert res.tool_calls[1].result["blocked"] is True
+
+
+def test_no_previous_area_blocks_a_launch_on_an_invented_place():
+    h = Harness([
+        call("rerun_with_different_algorithm", algorithm="flood"),
+        call("launch_analysis", location="Firenze", algorithm="flood"),
+        relay_tool_results,
+    ])
+    res = h.agent.run("stessa zona ma con alluvione", "fresh-session")
+    assert h.repo.all() == [] and res.job_id is None
+    assert res.tool_calls[0].result["needs_user"] is True
+    assert res.tool_calls[1].result["blocked"] is True
+    assert res.text == "No previous analysis in this session. Specify a location."
+
+
+def test_empty_location_blocks_an_invented_place():
+    h = Harness([
+        call("launch_analysis", location="", algorithm="ndvi"),
+        call("launch_analysis", location="Firenze", algorithm="ndvi"),
+        relay_tool_results,
+    ])
+    res = h.agent.run("fammi un'analisi ndvi", "s1")
+    assert h.repo.all() == [] and res.tool_calls[1].result["blocked"] is True
+
+
+@pytest.mark.parametrize(
+    "bad,fixed,fragment",
+    [
+        ({"location": "Firenze", "algorithm": "salute colture"}, {"location": "Firenze", "algorithm": "ndvi"},
+         "Unknown algorithm"),
+        ({"location": "Fiorenze", "algorithm": "ndvi"}, {"location": "Firenze", "algorithm": "ndvi"},
+         "Could not geocode"),
+        ({"location": "Firenze", "algorithm": "ndvi", "days_back": "three months"},
+         {"location": "Firenze", "algorithm": "ndvi", "days_back": 90}, "whole number"),
+        ({"location": "Firenze", "algorithm": "ndvi", "days_back": 0},
+         {"location": "Firenze", "algorithm": "ndvi", "days_back": 1}, "must be >= 1"),
+        ({"location": "Firenze " + "x" * 200, "algorithm": "ndvi"}, {"location": "Firenze", "algorithm": "ndvi"},
+         "too long"),
+    ],
+    ids=["unknown-alias", "geocode-miss", "days-format", "days-zero", "location-too-long"],
+)
+def test_model_fixable_rejection_allows_the_corrected_retry(bad, fixed, fragment):
+    h = Harness([call("launch_analysis", **bad), call("launch_analysis", **fixed), relay_tool_results])
+    res = h.agent.run("x", "s1")
+    first, second = res.tool_calls
+    assert fragment in first.result["error"]
+    assert "needs_user" not in first.result and "blocked" not in second.result
+    [job] = h.repo.all()
+    assert res.job_id == str(job.id) and job.algorithm == "ndvi"
+
+
+def test_non_job_tools_still_run_after_a_block():
+    h = Harness([
+        call("launch_analysis", location="Firenze", algorithm="ndvi", days_back=730),
+        call("list_capabilities"),
+        relay_tool_results,
+    ])
+    res = h.agent.run("x", "s1")
+    assert "algorithms" in res.tool_calls[1].result
+
+
+def test_block_lasts_for_one_request_only():
+    h = Harness([
+        call("launch_analysis", location="Firenze", algorithm="ndvi", days_back=730), relay_tool_results,
+        call("launch_analysis", location="Firenze", algorithm="ndvi", days_back=365), relay_tool_results,
+    ])
+    assert h.agent.run("ndvi firenze ultimi 2 anni", "s1").job_id is None
+    # The user now asks for one year themselves: a new request, so it runs.
+    assert h.agent.run("ok, allora l'ultimo anno", "s1").job_id is not None
+
+
+def test_block_survives_a_retry_of_the_same_request():
+    h = Harness([
+        call("launch_analysis", location="Firenze", algorithm="ndvi", days_back=730),
+        RateLimitError("429"),
+        call("launch_analysis", location="Firenze", algorithm="ndvi", days_back=365),
+        relay_tool_results,
+    ])
+    res = h.agent.run("ndvi firenze ultimi 2 anni", "s1")
+    assert h.repo.all() == [] and res.job_id is None
+    assert res.tool_calls[-1].result["blocked"] is True
+
+
+def test_round_cap_after_a_block_reports_the_limit():
+    steps = [call("launch_analysis", location="Firenze", algorithm="ndvi", days_back=d)
+             for d in (730, 365, 300, 200, 100)]
+    h = Harness(steps, max_tool_rounds=5)
+    res = h.agent.run("x", "s1")
+    assert h.repo.all() == []
+    assert res.text.startswith(LIMIT_730)
+
+
+def test_job_created_before_a_limit_is_kept_and_reported():
+    h = Harness([
+        call("launch_analysis", location="Firenze", algorithm="ndvi"),
+        call("launch_analysis", location="Pisa", algorithm="ndvi", days_back=730),
+        call("launch_analysis", location="Pisa", algorithm="ndvi", days_back=365),
+        relay_tool_results,
+    ])
+    res = h.agent.run("ndvi firenze, e pisa ultimi 2 anni", "s1")
+    [job] = h.repo.all()
+    assert res.job_id == str(job.id) and job.params["geocoded_name"].startswith("Firenze")
 
 
 # ---------------------------------------------------------------- loop limits

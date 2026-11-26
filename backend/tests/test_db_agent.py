@@ -183,7 +183,7 @@ def test_schema_doc_comes_from_the_catalog(executor):
     assert set(doc.relation_names()) == VIEWS
     text = doc.render()
     assert "agent.analyses: One row per satellite analysis job" in text
-    assert "severity_label (text): watch, suspect or alert." in text
+    assert "severity_label (text): Severity name. Values: 'watch', 'suspect', 'alert'" in text
     assert "footprint (geometry(Polygon,4326))" in text
 
 

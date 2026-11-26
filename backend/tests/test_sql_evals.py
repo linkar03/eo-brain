@@ -179,6 +179,129 @@ def test_summary_counts():
     assert s["db_unchanged"] is True
 
 
+# ----------------------------------------------------------------- lenient column-subset figure
+#
+# Reported next to the strict execution accuracy; it must never change pass/fail.
+
+def _subset(rows, gold, ordered=False):
+    return sql_suite.column_subset_match(rows, gold, ordered=ordered)
+
+
+def test_subset_match_tolerates_extra_columns_in_any_position():
+    gold = [["id-2"], ["id-4"]]
+    rows = [["flood extent", "id-2", "2026-01-12"], ["NDVI", "id-4", "2026-01-13"]]
+    m = _subset(rows, gold)
+    assert m.matched and m.mapping == [1]
+
+
+def test_subset_match_accepts_reordered_columns_and_int_vs_float():
+    # live it-sql-poligoni-retry-after-db-error: extra columns, coalesce() returned 0.0 / 3.0
+    gold = [["id-1", 4], ["id-2", 3], ["id-4", 0]]
+    rows = [["id-4", "ndvi", 0.0], ["id-2", "flood", 3.0], ["id-1", "flood", 4.0]]
+    assert _subset(rows, gold).matched
+    assert _subset([[3.0 + 1e-12]], [[3]]).matched          # tiny float noise
+    assert not _subset([[3.01]], [[3]]).matched              # a real difference
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [["id-2", "a"], ["id-4", "b"], ["id-5", "c"]],      # extra row
+        [["id-2", "a"]],                                     # missing row
+        [["id-2", "a"], ["id-9", "b"]],                      # wrong value
+        [["id-2", "a"], ["id-2", "b"]],                      # duplicates do not stand in for a missing row
+    ],
+    ids=["extra-row", "missing-row", "wrong-value", "duplicate-row"],
+)
+def test_subset_match_still_fails_on_row_differences(rows):
+    assert not _subset(rows, [["id-2"], ["id-4"]]).matched
+
+
+def test_subset_match_tries_every_mapping_when_columns_share_values():
+    # Both agent columns 0 and 1 hold the multiset {1, 2}; only column 1 pairs
+    # correctly with the text column. Taking the first candidate would say "no".
+    gold = [[1, "x"], [2, "y"]]
+    rows = [[2, 1, "x"], [1, 2, "y"]]
+    m = _subset(rows, gold)
+    assert m.matched and m.mapping == [1, 2]
+    # ...and when no mapping pairs them correctly, the answer is no.
+    assert not _subset([[2, 2, "x"], [1, 1, "y"]], gold).matched
+
+
+def test_subset_match_is_one_to_one():
+    # Two gold columns may not both map onto the agent's single matching column.
+    assert not _subset([[1, 5]], [[1, 1]]).matched
+    assert _subset([[1, 5, 1]], [[1, 1]]).matched
+
+
+def test_subset_match_on_an_empty_gold_result():
+    assert _subset([], []).matched                            # empty matches empty, whatever the columns
+    assert not _subset([["anything"]], []).matched            # any row is an extra row
+
+
+def test_subset_match_nulls_equal_only_nulls():
+    assert _subset([[None, "a"]], [[None]]).matched
+    assert not _subset([[0, "a"]], [[None]]).matched
+    assert not _subset([[None, "a"]], [[0]]).matched
+    assert not _subset([[""]], [[None]]).matched
+    # live en-sql-lisa-high-outliers: count 0 and NULL sum against gold (2, 6.5)
+    assert not _subset([[0, None]], [[2, 6.5]]).matched
+
+
+def test_subset_match_respects_order_only_for_ordered_cases():
+    # Decision: like the strict comparison, order counts only when the case sets
+    # `ordered: true` (the question asks for an order, e.g. "the last two").
+    gold = [["id-2", 12.0], ["id-1", 8.0]]
+    rows = [["id-1", "x", 8.0], ["id-2", "y", 12.0]]
+    assert _subset(rows, gold, ordered=False).matched
+    assert not _subset(rows, gold, ordered=True).matched
+    assert _subset(list(reversed(rows)), gold, ordered=True).matched
+
+
+def test_subset_match_rejects_the_live_ordered_comparison_answer():
+    # live it-sql-confronta-ultime-due-alluvioni: every severity of every flood, not the
+    # alert area of the last two. Same columns are there, the rows are not.
+    gold = [["id-2", 12.0], ["id-1", 8.0]]
+    rows = [["id-2", "suspect", 2, 4.5], ["id-2", "alert", 1, 12.0], ["id-1", "alert", 2, 8.0],
+            ["id-1", "suspect", 1, 4.0], ["id-1", "watch", 1, 1.0]]
+    assert not _subset(rows, gold, ordered=True).matched
+
+
+def test_subset_match_tolerance_pairs_rows_globally():
+    # Tolerance (abs 1e-6) is not transitive: gold 1.0000005 fits both agent values,
+    # gold 1.0000014 fits only 1.0000010. A greedy pairing that gives 1.0000010 to the
+    # first gold row would report a mismatch; the matching re-pairs.
+    gold = [[1.0000005, "a"], [1.0000014, "a"]]
+    rows = [[1.0000010, "a"], [1.0000000, "a"]]
+    assert sql_suite._rows_equal(gold[0], rows[0]) and sql_suite._rows_equal(gold[0], rows[1])
+    assert sql_suite._rows_equal(gold[1], rows[0]) and not sql_suite._rows_equal(gold[1], rows[1])
+    assert _subset(rows, gold).matched
+    assert not _subset([[1.0000010, "a"], [1.0000030, "a"]], gold).matched
+
+
+def test_strict_match_implies_subset_match():
+    for rows, gold in [([[12.0]], [[12]]), ([["x", 6.0000001]], [["x", 6.0]]), ([[None, True]], [[None, 1]])]:
+        strict = normalize_rows(rows, ordered=False) == normalize_rows(gold, ordered=False)
+        assert strict and _subset(rows, gold).matched
+
+
+def test_subset_figure_is_reported_but_never_changes_pass_fail():
+    case = _case("sql_result", gold_sql="x")
+    res = DataAgentResult(status="ok", question="q", sql="SELECT 1", columns=["label", "analysis_id"],
+                          rows=[["flood extent", "id-2"]])
+    r = score_sql_case(case, res, gold_rows=[["id-2"]], db_unchanged=True)
+    assert r.exec_match is False and r.passed is False and r.outcome == "fail"
+    assert r.column_subset_match is True and r.column_mapping == ["analysis_id"]
+    blocked = score_sql_case(_case("blocked"), _result("refused"), gold_rows=None, db_unchanged=True)
+    assert blocked.column_subset_match is None
+    refused = score_sql_case(case, _result("refused"), gold_rows=[["id-2"]], db_unchanged=True)
+    assert refused.column_subset_match is False
+    s = summarize_sql([r, refused, blocked])
+    assert s["execution_accuracy"] == {"correct": 0, "total": 2, "rate": 0.0}
+    assert s["column_subset_accuracy"] == {"correct": 1, "total": 2, "rate": 0.5}
+    assert s["passed"] == 1  # only the blocked case
+
+
 # ----------------------------------------------------------------- against a database
 
 
@@ -197,17 +320,19 @@ def test_scripted_sql_suite_passes_and_a_wrong_answer_is_caught(dataset):
 
     db = create_scratch_db(ADMIN_URL, prefix="agent_test_eval")
     try:
-        results = sql_suite.run_sql_suite(
+        results, stop_reason = sql_suite.run_sql_suite(
             cases, agent_dsn=db.agent_dsn, admin_dsn=db.admin_dsn,
             provider=ScriptedProvider([]), models=["scripted-replay"], fingerprint=fingerprint,
         )
+        assert stop_reason is None
     finally:
         drop_scratch_db(ADMIN_URL, db)
 
     by_id = {r.id: r for r in results}
     control = by_id.pop("wrong-answer-control")
     assert control.status == "ok" and control.rows == [[8.0]] and control.gold_rows == [[12.0]]
-    assert not control.passed
+    assert not control.passed and control.outcome == "fail"
+    assert all(r.outcome == "pass" for r in by_id.values())
     failed = [r.id for r in by_id.values() if not r.passed]
     assert failed == []
     assert all(r.db_unchanged for r in results)

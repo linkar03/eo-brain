@@ -66,8 +66,26 @@ class ToolResults:
 Message = Union[UserMessage, ModelTurn, ToolResults]
 
 
+# HTTP statuses that usually clear up on their own (timeout, overload).
+TRANSIENT_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
 class ProviderError(Exception):
-    """Any failure talking to the model provider."""
+    """
+    Any failure talking to the model provider.
+
+    ``status`` is the provider's HTTP status when there is one (e.g. 503
+    "high demand"); ``transient`` says whether the same request may succeed
+    if sent again a little later.
+    """
+
+    def __init__(self, message: str, *, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def transient(self) -> bool:
+        return self.status in TRANSIENT_STATUSES
 
 
 class RateLimitError(ProviderError):
@@ -79,8 +97,12 @@ class RateLimitError(ProviderError):
     """
 
     def __init__(self, message: str, *, daily_quota: bool = False):
-        super().__init__(message)
+        super().__init__(message, status=429)
         self.daily_quota = daily_quota
+
+    @property
+    def transient(self) -> bool:
+        return not self.daily_quota
 
 
 class LLMProvider(Protocol):

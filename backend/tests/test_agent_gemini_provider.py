@@ -165,3 +165,46 @@ def test_missing_key(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(ProviderError, match="GEMINI_API_KEY"):
         GeminiProvider()
+
+
+@pytest.mark.parametrize(
+    "error,status,transient",
+    [
+        (errors.ClientError(400, {"error": {"code": 400, "message": "bad", "status": "INVALID_ARGUMENT"}}), 400, False),
+        (errors.ClientError(404, {"error": {"code": 404, "message": "no model", "status": "NOT_FOUND"}}), 404, False),
+        (errors.ServerError(503, {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}}),
+         503, True),
+        (errors.ServerError(500, {"error": {"code": 500, "message": "x", "status": "INTERNAL"}}), 500, True),
+        (ConnectionError("offline"), None, False),
+    ],
+)
+def test_provider_error_carries_status_and_transient_flag(error, status, transient):
+    with pytest.raises(ProviderError) as exc:
+        _generate(GeminiProvider(client=FakeClient(error)))
+    assert exc.value.status == status
+    assert exc.value.transient is transient
+
+
+def test_rate_limits_are_transient_unless_daily():
+    with pytest.raises(RateLimitError) as per_minute:
+        _generate(GeminiProvider(client=FakeClient(_client_error("Resource has been exhausted"))))
+    assert per_minute.value.transient is True and per_minute.value.status == 429
+    with pytest.raises(RateLimitError) as daily:
+        _generate(GeminiProvider(client=FakeClient(_client_error("Quota exceeded ... limit: 0, PerDay"))))
+    assert daily.value.transient is False
+
+
+def test_free_tier_daily_quota_message_is_detected():
+    """Shape of the 429 body seen on a real free-tier run (no secrets in it)."""
+    body = {"error": {
+        "code": 429,
+        "message": "You exceeded your current quota. * Quota exceeded for metric: "
+                   "generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, "
+                   "model: gemini-3.6-flash, description: Generate content requests per day limit exceeded.",
+        "status": "RESOURCE_EXHAUSTED",
+        "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [
+            {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier", "quotaValue": "20"}]}],
+    }}
+    with pytest.raises(RateLimitError) as exc:
+        _generate(GeminiProvider(client=FakeClient(errors.ClientError(429, body))))
+    assert exc.value.daily_quota is True

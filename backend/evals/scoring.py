@@ -12,7 +12,14 @@ Scoring rules (kept deliberately simple and documented in the README):
 * ``location`` is compared on normalised text (casefold, no accents, no
   punctuation) by whole-word phrase containment.
 * A refusal case passes when the final turn created no job, whether the
-  model declined in text or a deterministic validator rejected the call.
+  model declined in text, a deterministic validator rejected the call, or
+  the needs-user guard refused a retry after such a rejection
+  (``guard_blocked`` counts those refused calls; ``calls`` lists every call
+  of the scored turn with its arguments and outcome).
+* A case whose model call failed (no model in the chain produced an answer,
+  in the scored turn or in a setup turn) is outcome "error": it is neither a
+  pass nor a fail, and it is left out of every rate below. Cases skipped
+  after the run stopped are outcome "not_run". See evals/provider_guard.py.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from eo_brain.agent.validators import ValidationError, resolve_algorithm
+from evals.provider_guard import completeness
 from evals.stubs import contains_phrase
 
 DEFAULT_DAYS_BACK = 30
@@ -45,6 +53,20 @@ class CaseResult:
     tool_errors: List[str] = field(default_factory=list)
     note: str = ""
     tags: List[str] = field(default_factory=list)
+    outcome: str = ""             # pass | fail | error | not_run
+    error: Optional[str] = None   # full provider error text (outcome "error")
+    error_kind: Optional[str] = None    # provider | harness
+    error_reason: Optional[str] = None  # daily_quota | rate_limit | unavailable | provider | other
+    model: Optional[str] = None
+    runs: int = 1                 # times the runner ran the case (transient-error retry)
+    elapsed_s: Optional[float] = None
+    provider_errors: List[Dict[str, Any]] = field(default_factory=list)
+    calls: List[Dict[str, Any]] = field(default_factory=list)  # every call of the scored turn
+    guard_blocked: int = 0        # job-creating calls refused by the needs-user guard
+
+    def __post_init__(self):
+        if not self.outcome:
+            self.outcome = "pass" if self.passed else "fail"
 
     def to_dict(self) -> Dict[str, Any]:
         return dict(self.__dict__)
@@ -102,13 +124,59 @@ def check_constraint(value: Any, constraint: Dict[str, Any]) -> bool:
     raise ValueError(f"Unknown constraint: {constraint!r}")
 
 
+def call_log(calls) -> List[Dict[str, Any]]:
+    """What each call asked for and what code answered, for the report."""
+    log = []
+    for c in calls:
+        res = c.result or {}
+        log.append({
+            "tool": c.name, "args": dict(c.args), "job_id": res.get("job_id"),
+            "error": res.get("error"), "needs_user": bool(res.get("needs_user")),
+            "blocked": bool(res.get("blocked")),
+        })
+    return log
+
+
+def _empty_result(case: Dict[str, Any], *, outcome: str, **extra) -> CaseResult:
+    expect = case["expect"]
+    fields: Dict[str, Any] = dict(
+        id=case["id"], lang=case.get("lang", "?"), kind=expect["type"],
+        expected_tool=expect.get("tool"), called_tools=[], effective_args={}, arg_checks={},
+        job_created=False, tool_ok=None, args_ok=None, refused_ok=None, passed=False,
+        tags=list(case.get("tags", [])), outcome=outcome,
+    )
+    fields.update(extra)
+    return CaseResult(**fields)
+
+
+def errored_case(case: Dict[str, Any], agent_result, *, during: str = "") -> CaseResult:
+    """The model never produced an answer: nothing to score."""
+    return _empty_result(
+        case, outcome="error", error_kind="provider", error=agent_result.error,
+        reply_text=agent_result.text, note=during,
+        called_tools=[c.name for c in agent_result.tool_calls],
+        calls=call_log(agent_result.tool_calls),
+    )
+
+
+def not_run_case(case: Dict[str, Any], reason: str) -> CaseResult:
+    return _empty_result(case, outcome="not_run", note=reason, runs=0)
+
+
 def score_case(case: Dict[str, Any], agent_result, note: str = "") -> CaseResult:
     expect = case["expect"]
     kind = expect["type"]
+    if kind not in ("refusal", "tool_call"):
+        raise ValueError(f"Case {case['id']}: unknown expect.type {kind!r}")
+    if agent_result.error:
+        # AgentResult.error is set only when every model in the chain failed.
+        return errored_case(case, agent_result)
+
     calls = list(agent_result.tool_calls)
     called = [c.name for c in calls]
     job_created = agent_result.job_id is not None
     errors = [str(c.result.get("error")) for c in calls if c.result and c.result.get("error")]
+    log = call_log(calls)
 
     base = dict(
         id=case["id"],
@@ -118,8 +186,11 @@ def score_case(case: Dict[str, Any], agent_result, note: str = "") -> CaseResult
         job_created=job_created,
         reply_text=agent_result.text,
         tool_errors=errors,
-        note=note or (agent_result.error or ""),
+        note=note,
         tags=list(case.get("tags", [])),
+        model=agent_result.model,
+        calls=log,
+        guard_blocked=sum(1 for c in log if c["blocked"]),
     )
 
     if kind == "refusal":
@@ -128,9 +199,6 @@ def score_case(case: Dict[str, Any], agent_result, note: str = "") -> CaseResult
             expected_tool=None, effective_args={}, arg_checks={},
             tool_ok=None, args_ok=None, refused_ok=ok, passed=ok and not note, **base,
         )
-
-    if kind != "tool_call":
-        raise ValueError(f"Case {case['id']}: unknown expect.type {kind!r}")
 
     expected_tool = expect["tool"]
     first = calls[0] if calls else None
@@ -155,12 +223,15 @@ def _ratio(num: int, den: int) -> Dict[str, Any]:
 
 
 def summarize(results: List[CaseResult]) -> Dict[str, Any]:
-    tool_cases = [r for r in results if r.kind == "tool_call"]
-    refusal_cases = [r for r in results if r.kind == "refusal"]
+    """Rates over ANSWERED cases only (outcome pass/fail); errored and not-run cases are counted apart."""
+    answered = [r for r in results if r.outcome in ("pass", "fail")]
+    tool_cases = [r for r in answered if r.kind == "tool_call"]
+    refusal_cases = [r for r in answered if r.kind == "refusal"]
     routing_cases = [r for r in tool_cases if "routing" in r.tags]
     return {
-        "cases": len(results),
-        "passed": sum(r.passed for r in results),
+        **completeness(results),
+        "passed": sum(r.outcome == "pass" for r in results),
+        "failed": sum(r.outcome == "fail" for r in results),
         "tool_selection_accuracy": _ratio(sum(bool(r.tool_ok) for r in tool_cases), len(tool_cases)),
         "argument_accuracy": _ratio(sum(bool(r.args_ok) for r in tool_cases), len(tool_cases)),
         "correct_refusal_rate": _ratio(sum(bool(r.refused_ok) for r in refusal_cases), len(refusal_cases)),
@@ -168,5 +239,6 @@ def summarize(results: List[CaseResult]) -> Dict[str, Any]:
         "false_refusals": sum(
             1 for r in tool_cases if r.expected_tool in JOB_TOOLS and not r.job_created
         ),
-        "errored": sum(1 for r in results if r.note),
+        "setup_failures": sum(1 for r in answered if r.note),
+        "guard_blocked_cases": sum(1 for r in answered if r.guard_blocked),
     }

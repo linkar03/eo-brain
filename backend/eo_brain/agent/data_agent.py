@@ -77,6 +77,9 @@ RULES
    ST_Intersects(a.footprint, b.footprint) or ST_Area(footprint::geography). They are never returned.
 5. Prefer the ready-made unit columns (area_ha, total_area_ha, area_km2...) and labels
    (severity_label: watch / suspect / alert). "Latest" means the highest created_at.
+   A column documented with "Values: ..." can hold only the listed values, exactly as written
+   (quoted text is case-sensitive): filter it with = or IN on those values, never with LIKE or
+   ILIKE on the words of its explanation.
 6. Return only the columns needed to answer, with readable aliases.
 7. If the question cannot be answered from these views, or asks to modify data or to read
    anything else (other schemas, system catalogs, settings, files), call refuse.
@@ -108,6 +111,10 @@ class DataAgentResult:
     error: Optional[str] = None       # failure reason
     attempts: List[SQLAttempt] = field(default_factory=list)
     model: Optional[str] = None
+    # Why status is "failed": "gave_up" (attempts used up on gate / database /
+    # protocol errors), "provider" (no model in the chain produced an answer),
+    # "database" (schema doc unavailable) or "input" (empty question).
+    failure: Optional[str] = None
 
     @property
     def gate_rejections(self) -> int:
@@ -176,12 +183,13 @@ class DataAgent:
 
     def answer(self, question: str, *, area_hint: Optional[str] = None) -> DataAgentResult:
         if not isinstance(question, str) or not question.strip():
-            return DataAgentResult(status="failed", question=str(question), error="empty question")
+            return DataAgentResult(status="failed", question=str(question), error="empty question",
+                                   failure="input")
         question = question.strip()[:MAX_QUESTION_CHARS]
         try:
             prompt = self.system_prompt()
         except QueryError as e:
-            return DataAgentResult(status="failed", question=question, error=str(e))
+            return DataAgentResult(status="failed", question=question, error=str(e), failure="database")
 
         text = question if not area_hint else f"{question}\n\n(Context from the app: {area_hint})"
         messages: List[Message] = [UserMessage(text=text)]
@@ -199,7 +207,7 @@ class DataAgent:
                 model_idx += 1
                 if model_idx >= len(self.models):
                     return DataAgentResult(status="failed", question=question, attempts=attempts,
-                                           error=f"model unavailable: {e}")
+                                           error=f"model unavailable: {e}", failure="provider")
                 continue
 
             if turn is None or not turn.tool_calls:
@@ -238,7 +246,7 @@ class DataAgent:
 
         last = attempts[-1].error if attempts else "no attempt"
         return DataAgentResult(
-            status="failed", question=question, attempts=attempts,
+            status="failed", question=question, attempts=attempts, failure="gave_up",
             sql=None, error=f"gave up after {len(attempts)} attempts; last error: {last}",
         )
 
