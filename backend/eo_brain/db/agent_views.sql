@@ -54,11 +54,37 @@ SELECT
     ST_XMax(j.bbox)                             AS east,
     ST_YMax(j.bbox)                             AS north,
     j.message                                   AS status_message,
-    j.bbox                                      AS footprint
+    j.bbox                                      AS footprint,
+    -- Coverage (api.main writes result.coverage, core.coverage computes it).
+    -- Appended after footprint: CREATE OR REPLACE VIEW can only add columns at the end.
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'coverage_pct') = 'number'
+         THEN (j.result -> 'coverage' ->> 'coverage_pct')::double precision END AS coverage_pct,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'low_coverage') = 'boolean'
+         THEN (j.result -> 'coverage' ->> 'low_coverage')::boolean END AS low_coverage,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'uncovered_masked_pct') = 'number'
+         THEN (j.result -> 'coverage' ->> 'uncovered_masked_pct')::double precision END AS uncovered_masked_pct,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'uncovered_no_data_pct') = 'number'
+         THEN (j.result -> 'coverage' ->> 'uncovered_no_data_pct')::double precision END AS uncovered_no_data_pct,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'scenes_found') = 'number'
+         THEN (j.result -> 'coverage' ->> 'scenes_found')::integer END AS scenes_found,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'scenes_too_cloudy') = 'number'
+         THEN (j.result -> 'coverage' ->> 'scenes_too_cloudy')::integer END AS scenes_too_cloudy,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'scenes_checked') = 'number'
+         THEN (j.result -> 'coverage' ->> 'scenes_checked')::integer END AS scenes_checked,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'scenes_with_clear_pixels') = 'number'
+         THEN (j.result -> 'coverage' ->> 'scenes_with_clear_pixels')::integer END AS scenes_with_clear_pixels,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'scenes_used') = 'number'
+         THEN (j.result -> 'coverage' ->> 'scenes_used')::integer END AS scenes_used,
+    CASE WHEN jsonb_typeof(j.result -> 'coverage' -> 'acquisition_days_with_data') = 'number'
+         THEN (j.result -> 'coverage' ->> 'acquisition_days_with_data')::integer END AS acquisition_days,
+    CASE WHEN (j.result -> 'coverage' ->> 'first_date_with_data') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+         THEN (j.result -> 'coverage' ->> 'first_date_with_data')::date END AS first_acquisition,
+    CASE WHEN (j.result -> 'coverage' ->> 'last_date_with_data') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+         THEN (j.result -> 'coverage' ->> 'last_date_with_data')::date END AS last_acquisition
 FROM public.jobs AS j;
 
 COMMENT ON VIEW agent.analyses IS
-    'One row per satellite analysis job (requested area, algorithm, time window, status).';
+    'One row per satellite analysis job (requested area, algorithm, time window, status; for completed jobs, how much of the area has data, and why the rest has none).';
 COMMENT ON COLUMN agent.analyses.analysis_id IS 'Unique id of the analysis (uuid).';
 COMMENT ON COLUMN agent.analyses.algorithm IS
     $$Algorithm code. Values: 'ndvi', 'ndwi', 'mndwi', 'flood', 'lisa'. Filter on this column, not on algorithm_label.$$;
@@ -83,6 +109,22 @@ COMMENT ON COLUMN agent.analyses.north IS 'Bounding box north latitude (WGS84 de
 COMMENT ON COLUMN agent.analyses.status_message IS 'Last progress or error message.';
 COMMENT ON COLUMN agent.analyses.footprint IS
     'Bounding box polygon, EPSG:4326. Use only inside spatial functions (ST_Intersects, ST_Area(footprint::geography)); never returned.';
+COMMENT ON COLUMN agent.analyses.coverage_pct IS
+    'Percent (0 to 100) of the requested area with a cloud-free result value, rounded down. NULL unless completed (and for analyses run before coverage was recorded). The rest of the area is blank on the map: see uncovered_masked_pct and uncovered_no_data_pct for why.';
+COMMENT ON COLUMN agent.analyses.low_coverage IS
+    'TRUE when coverage_pct is below 80: the analysis completed, but a fifth or more of the area has no data and its figures describe only the covered part; status_message then states the reason. FALSE otherwise; NULL when coverage_pct is NULL.';
+COMMENT ON COLUMN agent.analyses.uncovered_masked_pct IS
+    'Percent of the requested area that the loaded scenes saw but the cloud mask removed on every acquisition day (clouds, cloud shadows, snow). Large values mean a cloudy time window; a longer window usually helps.';
+COMMENT ON COLUMN agent.analyses.uncovered_no_data_pct IS
+    'Percent of the requested area outside the footprint of every loaded scene (no satellite pass imaged it in the scenes used).';
+COMMENT ON COLUMN agent.analyses.scenes_found IS 'Satellite scenes in the catalogue for the area and time window, at any cloud cover.';
+COMMENT ON COLUMN agent.analyses.scenes_too_cloudy IS 'Scenes found whose whole-tile cloud cover was 95 percent or more; skipped without checking their pixels.';
+COMMENT ON COLUMN agent.analyses.scenes_checked IS 'Scenes whose cloud mask was checked over the area before choosing; NULL if the check was not possible.';
+COMMENT ON COLUMN agent.analyses.scenes_with_clear_pixels IS 'Scenes, among those checked, with at least one cloud-free pixel over the area.';
+COMMENT ON COLUMN agent.analyses.scenes_used IS 'Scenes actually loaded to compute the result (the best combination for coverage, not all scenes found).';
+COMMENT ON COLUMN agent.analyses.acquisition_days IS 'Acquisition days that contributed cloud-free pixels to the result.';
+COMMENT ON COLUMN agent.analyses.first_acquisition IS 'First acquisition day that contributed cloud-free pixels.';
+COMMENT ON COLUMN agent.analyses.last_acquisition IS 'Last acquisition day that contributed cloud-free pixels.';
 
 -- ---------------------------------------------------------------- alert areas
 

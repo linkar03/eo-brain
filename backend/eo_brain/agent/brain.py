@@ -42,7 +42,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from uuid import UUID
 
-from eo_brain.agent.geocoder import GeocodingResult, geocode_or_fail
+from eo_brain.agent.geocoder import (
+    GeocodingResult,
+    PlaceCandidate,
+    PlaceChoiceNeeded,
+    geocode_or_fail,
+    normalize as normalize_place,
+)
 from eo_brain.agent.llm import (
     LLMProvider,
     Message,
@@ -71,6 +77,9 @@ _MAX_INPUT_CHARS = 2000
 _MAX_RETRIES = 3
 _BACKOFF_BASE_SEC = 5
 _MAX_TOOL_ROUNDS = 5  # safety cap on tool call loops
+# Place lookups per chat request: each geocode_or_fail call makes at most
+# geocoder.MAX_LOOKUPS_PER_QUERY (4) Nominatim searches, so at most 8 per request.
+_MAX_GEOCODES_PER_REQUEST = 2
 _DEFAULT_DAYS_BACK = 30
 _PROVIDER_NAME = "element84-s2"
 
@@ -110,6 +119,21 @@ def _rejection(message: str, *, needs_user: bool) -> Dict[str, Any]:
     return {"error": message, "needs_user": True, "action_required": _NEEDS_USER_ACTION}
 
 
+def _choice_rejection(e: PlaceChoiceNeeded) -> Dict[str, Any]:
+    """Tool result when only the user can choose the place: the candidates, and how to pass the answer."""
+    return {
+        "error": str(e),
+        "needs_user": True,
+        "candidates": [{"location": c.label, "kind": c.kind, "in": c.where} for c in e.candidates],
+        "action_required": (
+            "Only the user can choose. List every candidate with its kind and where it is, and ask "
+            "which one is meant. Do not pick one yourself, and do not call launch_analysis or "
+            "rerun_with_different_algorithm again in this turn. When the user answers, call "
+            "launch_analysis with location set to the chosen candidate's 'location' text exactly."
+        ),
+    }
+
+
 # -- Tool declarations (provider-neutral JSON Schema) --
 
 TOOL_SPECS: List[ToolSpec] = [
@@ -126,7 +150,14 @@ TOOL_SPECS: List[ToolSpec] = [
             "properties": {
                 "location": {
                     "type": "string",
-                    "description": "Place name, e.g. 'Florence, Italy', 'Po River', 'Milan'",
+                    "description": (
+                        "The place as the user named it, with any qualifiers separated by commas "
+                        "(place, province or region, country), e.g. 'Casentino, Arezzo, Italia', "
+                        "'Florence, Italy', 'vallata del Casentino'. Keep words such as 'valle' or "
+                        "'provincia': they say what kind of place is meant. If the user is choosing "
+                        "among candidates an earlier reply listed, pass the chosen candidate's "
+                        "location text exactly."
+                    ),
                 },
                 "algorithm": {
                     "type": "string",
@@ -152,13 +183,20 @@ TOOL_SPECS: List[ToolSpec] = [
     ),
     ToolSpec(
         name="get_job_status",
-        description="Check the current status of an analysis job by its ID.",
+        description=(
+            "Status and result facts of one analysis job: progress, its message and, once "
+            "completed, its coverage (share of the requested area with cloud-free data, why "
+            "the rest has none, scenes and acquisition dates used). Use it for 'is it done' "
+            "and for 'why does the map look like this' about an analysis of this conversation."
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "job_id": {"type": "string", "description": "The job UUID"},
+                "job_id": {
+                    "type": "string",
+                    "description": "The job UUID. Omit it for the latest analysis launched in this conversation.",
+                },
             },
-            "required": ["job_id"],
         },
     ),
     ToolSpec(
@@ -223,7 +261,9 @@ RULES:
    call rerun_with_different_algorithm.
 3. If a tool returns an error, relay the exact error message to the user as a helpful suggestion. \
    If the result has needs_user, only the user can resolve it: relay the limit and ask the user \
-   how to proceed. Do not retry with other values (a shorter window, another place, another analysis).
+   how to proceed. Do not retry with other values (a shorter window, another place, another analysis). \
+   If it lists candidate places, show every candidate with its kind and where it is, and ask which \
+   one is meant; never choose one yourself.
 4. NEVER fabricate job IDs, URLs, or analysis results. Only report data returned by tools.
 5. NEVER run analyses the user did not request. If the user asks for something the analyses above \
    do not measure (traffic, weather, air quality, population, ...), say it is not supported and list \
@@ -244,7 +284,34 @@ RULES:
    -> query_database with the question. Never launch an analysis to answer such a question.
 12. Only state numbers that appear in tool results (for query_database: in the returned rows). \
    If query_database returns status "refused" or "failed", say so plainly; do not guess.
+13. Questions about what an analysis shows or why it looks the way it does (only part of the \
+   area covered, a strip, gaps, odd values) are answered only from tool results: call \
+   get_job_status (no job_id = the latest analysis of this conversation) or, for stored \
+   analyses, query_database, and explain with what they return (coverage, its reason, scenes, \
+   dates). If the results do not explain it, say the data does not tell; never offer causes \
+   they do not state (satellite orbits, terrain, sensor faults, processing errors).
 """
+
+
+# The coverage facts get_job_status passes to the model (core.coverage writes them).
+_COVERAGE_FACTS = (
+    "coverage_pct", "low_coverage", "low_coverage_below_pct",
+    "uncovered_masked_pct", "uncovered_no_data_pct",
+    "scenes_found", "scenes_too_cloudy", "scenes_checked", "scenes_with_clear_pixels", "scenes_used",
+    "acquisition_days_with_data", "first_date_with_data", "last_date_with_data",
+)
+
+
+def _coverage_facts(coverage: Any) -> Dict[str, Any]:
+    if not isinstance(coverage, dict):
+        return {"note": "coverage was not recorded for this analysis (it ran before coverage reporting)"}
+    return {k: coverage.get(k) for k in _COVERAGE_FACTS if k in coverage}
+
+
+def _window(start: Any, end: Any) -> Optional[str]:
+    if not start or not end:
+        return None
+    return f"{str(start)[:10]} to {str(end)[:10]}"
 
 
 # -- Per-request bookkeeping --
@@ -274,6 +341,8 @@ class _RequestContext:
     # user can resolve. Once set, job-creating calls are refused for the rest
     # of this request (all rounds, and any retry or fallback model).
     needs_user: Optional[str] = None
+    # Place lookups made in this request (see _MAX_GEOCODES_PER_REQUEST).
+    geocodes: int = 0
 
 
 @dataclass
@@ -348,6 +417,17 @@ class Agent:
         days_back: Optional[int] = _DEFAULT_DAYS_BACK,
     ) -> Dict[str, Any]:
         """Geocode + create analysis job. Returns dict with job_id or error."""
+        return self._launch(ctx, location, algorithm, days_back)
+
+    def _launch(
+        self,
+        ctx: _RequestContext,
+        location: str,
+        algorithm: str,
+        days_back: Optional[int] = _DEFAULT_DAYS_BACK,
+        place: Optional[GeocodingResult] = None,
+    ) -> Dict[str, Any]:
+        """``place``: an area already resolved (rerun on the session's area); no lookup then."""
         logger.info(
             f"launch_analysis: location='{location}', algorithm='{algorithm}', days_back={days_back}"
         )
@@ -362,13 +442,31 @@ class Agent:
             logger.warning(f"Validation failed: {e}")
             return _rejection(str(e), needs_user=e.needs_user)
 
-        try:
-            geo = self.geocode(location)
-            logger.info(f"Geocoded '{location}' -> {geo.name} bbox={geo.bbox}")
-        except ValueError as e:
-            # Model-fixable: the name may be misspelt or too vague.
-            logger.warning(f"Geocoding failed: {e}")
-            return _rejection(str(e), needs_user=False)
+        geo = place if place is not None else self._pending_choice(ctx, location)
+        if geo is not None and place is None:
+            logger.info(f"'{location}' is a candidate the user was asked to choose: {geo.name}")
+        if geo is None:
+            if ctx.geocodes >= _MAX_GEOCODES_PER_REQUEST:
+                return _rejection(
+                    f"The place could not be resolved in {_MAX_GEOCODES_PER_REQUEST} attempts in this "
+                    "request. Ask the user for a more precise place name (town, province, region or "
+                    "country).",
+                    needs_user=True,
+                )
+            ctx.geocodes += 1
+            try:
+                geo = self.geocode(location)
+                logger.info(f"Geocoded '{location}' -> {geo.name} bbox={geo.bbox}")
+            except PlaceChoiceNeeded as e:
+                # Only the user can choose: list the candidates and remember them,
+                # so that the answer resolves to exactly the one chosen.
+                logger.info(f"Place choice needed for '{location}': {[c.label for c in e.candidates]}")
+                self._remember_choice(ctx, e, algo, days_back)
+                return _choice_rejection(e)
+            except ValueError as e:
+                # Model-fixable: the name may be misspelt or too vague.
+                logger.warning(f"Geocoding failed: {e}")
+                return _rejection(str(e), needs_user=False)
 
         try:
             bbox = validate_bbox(geo.to_list())
@@ -406,6 +504,7 @@ class Agent:
                 session.set_context(
                     last_bbox=bbox, last_location=geo.name,
                     last_algorithm=algo, last_job_id=str(job.id),
+                    pending_place=None,
                 )
             except Exception:
                 logger.warning("Could not store session context", exc_info=True)
@@ -432,10 +531,93 @@ class Agent:
                 f"Estimated time: {time_est}."
             ),
         }
+        kind = f" ({geo.kind})" if getattr(geo, "kind", None) else ""
+        notes, said = [], []
+        fallback_from = getattr(geo, "fallback_from", None)
+        if fallback_from:
+            # Say which place was actually used: the retried text may match something
+            # narrower or different from what the user meant (a town for its province).
+            notes.append(
+                f"'{fallback_from}' was not found as written; searched for "
+                f"'{geo.matched_query}' instead and used {geo.name}{kind}."
+            )
+            said.append(f"'{fallback_from}' not found as written, used {geo.name}{kind}.")
+        if not getattr(geo, "area_like", True):
+            notes.append(
+                f"{geo.name} is a {geo.kind}, not a town, region or natural area: nothing else with "
+                "that name was found, and the analysis covers its bounding box."
+            )
+            said.append(f"{geo.name} is a {geo.kind}; the analysis covers its bounding box.")
+        if notes:
+            result["geocoding_note"] = " ".join(notes) + " Tell the user."
+            result["message"] += " Location: " + " ".join(said)
         ctx.last_launch = result
         return result
 
-    def _get_job_status(self, ctx: _RequestContext, job_id: str) -> Dict[str, Any]:
+    # -- Choosing among places --
+
+    def _remember_choice(self, ctx: _RequestContext, e: PlaceChoiceNeeded, algo: str, days_back: int) -> None:
+        if not ctx.session_id:
+            return
+        self.sessions.get_or_create(ctx.session_id).set_context(pending_place={
+            "query": e.query, "reason": e.reason, "algorithm": algo, "days_back": days_back,
+            "candidates": list(e.candidates), "note_shown": False,
+        })
+
+    def _pending_choice(self, ctx: _RequestContext, location: str) -> Optional[GeocodingResult]:
+        """
+        The candidate ``location`` picks among those the user was last asked to
+        choose from, or None. It picks one when it is that candidate's label,
+        or when it names the candidate and all its words appear in that
+        candidate's label and kind, and in no other candidate's
+        ("Casentino, Arezzo" picks the region, "Casentino" picks none).
+        """
+        if not ctx.session_id:
+            return None
+        pending = self.sessions.get_or_create(ctx.session_id).get_context("pending_place")
+        if not pending:
+            return None
+        candidates: List[PlaceCandidate] = pending["candidates"]
+        wanted = normalize_place(location)
+        for c in candidates:
+            if wanted == normalize_place(c.label):
+                return c.result
+        tokens = set(wanted.split())
+        hits = []
+        for c in candidates:
+            own = set(normalize_place(c.label.split(",")[0]).split())
+            if tokens and own <= tokens and tokens <= set(normalize_place(f"{c.label} {c.kind}").split()):
+                hits.append(c)
+        return hits[0].result if len(hits) == 1 else None
+
+    def _pending_note(self, session_id: str) -> Optional[str]:
+        """Context for the turn after a place question (the model sees no history), shown once."""
+        if not session_id:
+            return None
+        session = self.sessions.get_or_create(session_id)
+        pending = session.get_context("pending_place")
+        if not pending or pending.get("note_shown"):
+            return None
+        pending["note_shown"] = True
+        listed = "; ".join(f"{i}) {c.label} ({c.kind})" for i, c in enumerate(pending["candidates"], 1))
+        return (
+            "[Context from the app, not written by the user: the previous reply asked the user to "
+            f"choose the place for '{pending['query']}' ({pending['algorithm']}, "
+            f"{pending['days_back']} days). Candidates: {listed}. If the message below chooses one of "
+            "them (by number, name, province or region), call launch_analysis with location set to "
+            f"that candidate's text exactly as listed, algorithm '{pending['algorithm']}' and "
+            f"days_back {pending['days_back']}. Otherwise ignore this context.]"
+        )
+
+    def _get_job_status(self, ctx: _RequestContext, job_id: Optional[str] = None) -> Dict[str, Any]:
+        if not job_id:
+            if ctx.session_id:
+                job_id = self.sessions.get_or_create(ctx.session_id).get_context("last_job_id")
+            if not job_id:
+                return {"error": (
+                    "No analysis was launched in this conversation. Ask for the job ID, or "
+                    "use query_database for analyses stored earlier."
+                )}
         try:
             uid = UUID(str(job_id))
         except ValueError:
@@ -454,10 +636,14 @@ class Agent:
             result_summary = {
                 "tile_url": job.result.get("tile_url"),
                 "summary": job.result.get("summary"),
+                "coverage": _coverage_facts(job.result.get("coverage")),
             }
+        params = job.params or {}
         return {
             "job_id": str(job.id), "status": job.status,
             "algorithm": job.algorithm, "progress": job.progress,
+            "location": params.get("geocoded_name"),
+            "time_window": _window(job.start_date, job.end_date),
             "message": job.message, "result": result_summary,
         }
 
@@ -486,7 +672,15 @@ class Agent:
             )
 
         algo = algorithm if algorithm else session.get_context("last_algorithm", "ndvi")
-        return self._launch_analysis(ctx, location=last_location, algorithm=algo)
+        last_bbox = session.get_context("last_bbox")
+        place = None
+        if last_bbox and len(last_bbox) == 4:
+            # The same area as the last analysis, as stored: geocoding its name
+            # again could resolve to another place.
+            w, s, e, n = (float(v) for v in last_bbox)
+            place = GeocodingResult(name=last_location, lat=(s + n) / 2, lon=(w + e) / 2,
+                                    bbox=(w, s, e, n), source="session")
+        return self._launch(ctx, location=last_location, algorithm=algo, place=place)
 
     def _query_database(self, ctx: _RequestContext, question: str) -> Dict[str, Any]:
         """Delegate to the isolated data agent; it sees the question, not this conversation."""
@@ -635,9 +829,11 @@ class Agent:
 
         self.sessions.get_or_create(session_id)
         ctx = _RequestContext(session_id=session_id)
+        note = self._pending_note(session_id)
+        model_message = f"{note}\n\nUser message: {message}" if note else message
 
         try:
-            reply_text, model = self._call_with_fallback(message, ctx)
+            reply_text, model = self._call_with_fallback(model_message, ctx)
         except _AllModelsFailed as e:
             logger.error("All models exhausted", exc_info=True)
             return AgentResult(text=_UNAVAILABLE_TEXT, tool_calls=ctx.trace, error=str(e))

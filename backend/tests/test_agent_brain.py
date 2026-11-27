@@ -513,7 +513,57 @@ def test_get_job_status_variants():
     assert h.agent._get_job_status(ctx, missing) == {"error": f"Job {missing} not found."}
     found = h.agent._get_job_status(ctx, str(job.id))
     assert found["status"] == "completed"
-    assert found["result"] == {"tile_url": "http://t", "summary": {"a": 1}}
+    assert found["result"] == {
+        "tile_url": "http://t", "summary": {"a": 1},
+        "coverage": {"note": "coverage was not recorded for this analysis (it ran before coverage reporting)"},
+    }
+
+
+def test_get_job_status_reports_coverage_facts_only():
+    h = Harness()
+    job = h.repo.create(algorithm="ndvi", provider="p", bbox=[0, 0, 1, 1],
+                        start_date=FIXED_NOW - timedelta(days=30), end_date=FIXED_NOW,
+                        params={"geocoded_name": "Casentino"})
+    coverage = {"coverage_pct": 7.2, "low_coverage": True, "uncovered_masked_pct": 0.3,
+                "uncovered_no_data_pct": 92.4, "scenes_found": 27, "scenes_used": 1,
+                "area_px": 380172, "selection": {"scene_ids": ["x"]}}
+    job.status, job.result = "completed", {"tile_url": "t", "summary": {}, "coverage": coverage}
+    job.message = "Completed with partial coverage: ..."
+    from eo_brain.agent.brain import _RequestContext
+
+    found = h.agent._get_job_status(_RequestContext(session_id="s1"), str(job.id))
+    assert found["location"] == "Casentino"
+    assert found["time_window"] == f"{(FIXED_NOW - timedelta(days=30)).date()} to {FIXED_NOW.date()}"
+    assert found["message"].startswith("Completed with partial coverage")
+    assert found["result"]["coverage"] == {
+        "coverage_pct": 7.2, "low_coverage": True, "uncovered_masked_pct": 0.3,
+        "uncovered_no_data_pct": 92.4, "scenes_found": 27, "scenes_used": 1,
+    }
+
+
+def test_get_job_status_without_id_uses_the_sessions_latest_job():
+    h = Harness([call("launch_analysis", location="Firenze", algorithm="ndvi"), text("ok"),
+                 call("get_job_status"), relay_tool_results])
+    launched = h.agent.run("ndvi firenze", "s1")
+    status = h.agent.run("perché la mappa copre solo una striscia?", "s1")
+    assert launched.job_id and status.job_id is None
+    [inv] = status.tool_calls
+    assert inv.name == "get_job_status" and inv.result["job_id"] == launched.job_id
+
+
+def test_get_job_status_without_id_and_without_a_job_says_so():
+    from eo_brain.agent.brain import _RequestContext
+
+    h = Harness()
+    out = h.agent._get_job_status(_RequestContext(session_id="fresh"))
+    assert "No analysis was launched in this conversation" in out["error"]
+    assert "query_database" in out["error"]
+
+
+def test_prompt_forbids_invented_causes():
+    rule = brain.SYSTEM_PROMPT.split("13.")[1]
+    assert "only from tool results" in rule and "never offer causes" in rule
+    assert "get_job_status" in rule and "query_database" in rule
 
 
 # ---------------------------------------------------------------- module entry point
@@ -530,3 +580,191 @@ def test_chat_uses_injected_default_agent(monkeypatch):
     h = Harness([text("ciao")])
     monkeypatch.setattr(brain, "_default_agent", h.agent)
     assert brain.chat("ciao", "s1") == {"text": "ciao", "job_id": None, "bbox": None, "query": None}
+
+
+def test_launch_reports_a_geocoder_fallback():
+    from eo_brain.agent.geocoder import GeocodingResult
+
+    def geocode(q):
+        return GeocodingResult(name="Casentino, Arezzo, Toscana, Italia", lat=43.7, lon=11.8,
+                               bbox=(11.6, 43.55, 11.98, 43.88), source="nominatim_bbox",
+                               matched_query="Casentino", fallback_from=q)
+
+    h = Harness([call("launch_analysis", location="vallata del Casentino", algorithm="ndvi"), relay_tool_results])
+    h.agent.geocode = geocode
+    res = h.agent.run("ndvi vallata del Casentino", "s1")
+    [inv] = res.tool_calls
+    assert inv.result["location"] == "Casentino, Arezzo, Toscana, Italia"
+    assert "'vallata del Casentino' was not found as written" in inv.result["geocoding_note"]
+    assert "used Casentino, Arezzo, Toscana, Italia" in inv.result["message"]
+
+
+# ---------------------------------------------------------------- which place (recorded Nominatim responses)
+
+from pathlib import Path  # noqa: E402
+
+from eo_brain.agent.geocoder import GeocodingResult  # noqa: E402
+from evals.stubs import load_recorded_searches  # noqa: E402
+
+RECORDED = load_recorded_searches(Path(__file__).resolve().parents[1] / "evals" / "fixtures" / "nominatim_recorded.json")
+REGION = "Casentino, Arezzo, Tuscany, Italy"
+VILLAGE = "Casentino, Sant'Eusanio Forconese, L'Aquila, Abruzzo, 67040, Italy"
+
+
+def place_harness(*steps):
+    h = Harness(list(steps))
+    h.geocoder = StubGeocoder(GAZETTEER, RECORDED)
+    h.agent.geocode = h.geocoder
+    return h
+
+
+def ask_casentino(h, session="s1"):
+    h.add(call("launch_analysis", location="Casentino", algorithm="vegetation", days_back=60), relay_tool_results)
+    return h.agent.run("ndvi Casentino ultimi 60 giorni", session)
+
+
+def test_ambiguous_place_is_a_question_with_candidates_and_no_job():
+    h = place_harness()
+    res = ask_casentino(h)
+    [inv] = res.tool_calls
+    assert res.job_id is None and h.repo.all() == []
+    assert inv.result["needs_user"] is True
+    assert inv.result["candidates"] == [
+        {"location": VILLAGE, "kind": "village", "in": "L'Aquila, Abruzzo, Italy"},
+        {"location": REGION, "kind": "region", "in": "Arezzo, Tuscany, Italy"},
+    ]
+    assert "Do not pick one yourself" in inv.result["action_required"]
+    assert "location' text exactly" in inv.result["action_required"]
+    pending = h.sessions.get_or_create("s1").get_context("pending_place")
+    assert pending["algorithm"] == "ndvi" and pending["days_back"] == 60
+    assert [c.label for c in pending["candidates"]] == [VILLAGE, REGION]
+
+
+def test_model_cannot_pick_a_candidate_itself_in_the_same_turn():
+    h = place_harness(
+        call("launch_analysis", location="Casentino", algorithm="ndvi"),
+        call("launch_analysis", location=REGION, algorithm="ndvi"),
+        text("Ho scelto io."),
+    )
+    res = h.agent.run("ndvi Casentino", "s1")
+    assert res.job_id is None and h.repo.all() == []
+    assert res.tool_calls[1].result["blocked"] is True
+
+
+@pytest.mark.parametrize("label", [REGION, VILLAGE])
+def test_the_answer_resolves_to_exactly_the_listed_candidate(label):
+    h = place_harness()
+    asked = ask_casentino(h)
+    listed = {c["location"]: c for c in asked.tool_calls[0].result["candidates"]}
+    searches = list(h.geocoder.searches)
+    h.add(call("launch_analysis", location=label, algorithm="ndvi", days_back=60), relay_tool_results)
+    res = h.agent.run("quello giusto", "s1")
+    [job] = h.repo.all()
+    assert res.job_id == str(job.id) and job.params["geocoded_name"] == label
+    assert h.geocoder.searches == searches                  # pinned candidate: no new lookup
+    expected = h.geocoder._resolver.resolve(label).bbox     # what that label names on its own
+    assert job.bbox == pytest.approx(list(expected))
+    assert label in listed
+    assert h.sessions.get_or_create("s1").get_context("pending_place") is None
+
+
+def test_an_answer_naming_the_place_and_its_province_picks_that_one():
+    h = place_harness()
+    ask_casentino(h)
+    searches = list(h.geocoder.searches)
+    h.add(call("launch_analysis", location="Casentino, Arezzo", algorithm="ndvi"), relay_tool_results)
+    res = h.agent.run("Casentino in provincia di Arezzo", "s1")
+    assert res.job_id is not None and h.repo.all()[0].params["geocoded_name"] == REGION
+    assert h.geocoder.searches == searches
+
+
+def test_repeating_the_ambiguous_name_asks_again():
+    h = place_harness()
+    ask_casentino(h)
+    h.add(call("launch_analysis", location="Casentino", algorithm="ndvi"), relay_tool_results)
+    res = h.agent.run("Casentino", "s1")
+    assert res.job_id is None and res.tool_calls[0].result["candidates"]
+
+
+def test_context_note_after_a_question_is_shown_once():
+    h = place_harness()
+    ask_casentino(h)
+    h.add(text("Quale?"), text("Ok."))
+    h.agent.run("quello in Toscana", "s1")
+    h.agent.run("grazie", "s1")
+    first = h.provider.calls[-2].messages[0].text
+    assert first.startswith("[Context from the app, not written by the user")
+    assert f"1) {VILLAGE} (village); 2) {REGION} (region)" in first
+    assert "algorithm 'ndvi' and days_back 60" in first
+    assert first.endswith("User message: quello in Toscana")
+    assert h.provider.calls[-1].messages == [UserMessage(text="grazie")]
+
+
+def test_valley_phrasing_launches_on_the_region_and_says_how_it_was_found():
+    h = place_harness(call("launch_analysis", location="vallata del Casentino", algorithm="ndvi"), relay_tool_results)
+    res = h.agent.run("Per favore, trova NDVI nella vallata del Casentino.", "s1")
+    [inv] = res.tool_calls
+    assert inv.result["location"] == REGION
+    assert "searched for 'Casentino' instead and used " + REGION + " (region)" in inv.result["geocoding_note"]
+    assert "Location: 'vallata del Casentino' not found as written" in inv.result["message"]
+
+
+def test_region_asked_and_only_a_city_found_is_a_question():
+    h = place_harness(call("launch_analysis", location="piana di Pisa", algorithm="ndvi"), relay_tool_results)
+    res = h.agent.run("NDVI sulla piana di Pisa", "s1")
+    [inv] = res.tool_calls
+    assert res.job_id is None and inv.result["needs_user"]
+    assert inv.result["candidates"] == [{"location": "Pisa, Toscana, Italia", "kind": "city", "in": "Toscana, Italia"}]
+    assert "No region named as in 'piana di Pisa'" in inv.result["error"]
+
+
+def test_a_non_area_last_resort_is_reported():
+    def geocode(q):
+        return GeocodingResult(name="Via Roma, Pisa", lat=43.7, lon=10.4, bbox=(10.39, 43.69, 10.41, 43.71),
+                               source="nominatim_bbox", kind="road", area_like=False)
+
+    h = Harness([call("launch_analysis", location="Via Roma, Pisa", algorithm="ndvi"), relay_tool_results])
+    h.agent.geocode = geocode
+    [inv] = h.agent.run("ndvi via roma pisa", "s1").tool_calls
+    assert "Via Roma, Pisa is a road, not a town, region or natural area" in inv.result["geocoding_note"]
+    assert "the analysis covers its bounding box" in inv.result["message"]
+
+
+def test_place_lookups_per_request_are_bounded():
+    h = place_harness(
+        call("launch_analysis", location="Xyzzy", algorithm="ndvi"),
+        call("launch_analysis", location="Plugh", algorithm="ndvi"),
+        call("launch_analysis", location="Firenze", algorithm="ndvi"),
+        text("..."),
+    )
+    res = h.agent.run("ndvi xyzzy", "s1")
+    assert h.geocoder.queries == ["Xyzzy", "Plugh"]
+    third = res.tool_calls[2].result
+    assert third["needs_user"] and "could not be resolved in 2 attempts" in third["error"]
+    assert res.job_id is None
+
+
+def test_rerun_reuses_the_stored_area_without_a_lookup():
+    h = place_harness(
+        call("launch_analysis", location="vallata del Casentino", algorithm="ndvi"), relay_tool_results,
+        call("rerun_with_different_algorithm", algorithm="water"), relay_tool_results,
+    )
+    h.agent.run("ndvi vallata del Casentino", "s1")
+    queries = list(h.geocoder.queries)
+    res = h.agent.run("stessa zona, acqua", "s1")
+    first, second = h.repo.all()
+    assert h.geocoder.queries == queries == ["vallata del Casentino"]
+    assert second.bbox == first.bbox and second.params["geocoded_name"] == REGION
+    assert "geocoding_note" not in res.tool_calls[0].result
+
+
+def test_location_parameter_asks_for_commas_and_exact_candidates():
+    spec = next(t for t in TOOL_SPECS if t.name == "launch_analysis")
+    desc = spec.parameters["properties"]["location"]["description"]
+    assert "separated by commas" in desc and "'Casentino, Arezzo, Italia'" in desc
+    assert "candidate's location text exactly" in desc
+
+
+def test_prompt_says_to_list_candidates_and_not_choose():
+    assert "If it lists candidate places, show every candidate" in SYSTEM_PROMPT
+    assert "never choose one yourself" in SYSTEM_PROMPT

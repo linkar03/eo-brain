@@ -12,41 +12,58 @@
 --   analysis ...005 ndwi    failed     Nowhere Lake     no polygons
 --   analysis ...006 flood   pending    Sample Plain     no polygons
 --   footprints: 001 overlaps 002 and 004; 003 overlaps 006; 005 overlaps nothing.
+--   coverage (result.coverage, as api.main writes it; agent.analyses coverage_* columns):
+--     001 97.8 %   002 100 %   003 91.2 %   004 41.5 % low coverage (cloudy 7-day window,
+--     58.5 % masked by clouds, 6 of 9 scenes at least 95 % cloudy, 2 of the other 3 with
+--     clear pixels, 1 acquisition day)
+--     005 / 006 none (failed / pending)
 
 INSERT INTO jobs (id, status, algorithm, provider, bbox, start_date, end_date, params,
-                  progress, message, created_at, completed_at)
+                  progress, message, created_at, completed_at, result)
 VALUES
   ('00000000-0000-4000-a000-000000000001', 'completed', 'flood', 'element84-s2',
    ST_MakeEnvelope(11.00, 44.00, 11.10, 44.10, 4326),
    '2025-12-11 09:00:00+00', '2026-01-10 09:00:00+00',
    '{"geocoded_name": "Testville North (synthetic)", "resolution_m": 20, "apply_cloud_mask": true}',
-   100, 'done', '2026-01-10 09:00:00+00', '2026-01-10 09:01:35+00'),
+   100,
+   'Completed: cloud-free data covers 97.8% of the requested area (4 acquisition days, 2025-12-14 to 2026-01-08).',
+   '2026-01-10 09:00:00+00', '2026-01-10 09:01:35+00',
+   '{"coverage": {"coverage_pct": 97.8, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 2.2, "uncovered_no_data_pct": 0.0, "scenes_found": 14, "scenes_too_cloudy": 3, "scenes_checked": 11, "scenes_with_clear_pixels": 9, "scenes_used": 4, "acquisition_days_loaded": 4, "acquisition_days_with_data": 4, "first_date_with_data": "2025-12-14", "last_date_with_data": "2026-01-08"}}'),
   ('00000000-0000-4000-a000-000000000002', 'completed', 'flood', 'element84-s2',
    ST_MakeEnvelope(11.02, 44.02, 11.12, 44.12, 4326),
    '2025-10-14 10:00:00+00', '2026-01-12 10:00:00+00',
    '{"geocoded_name": "Testville North (synthetic)", "resolution_m": 20, "apply_cloud_mask": true}',
-   100, 'done', '2026-01-12 10:00:00+00', '2026-01-12 10:02:00+00'),
+   100,
+   'Completed: cloud-free data covers 100% of the requested area (5 acquisition days, 2025-10-20 to 2026-01-04).',
+   '2026-01-12 10:00:00+00', '2026-01-12 10:02:00+00',
+   '{"coverage": {"coverage_pct": 100.0, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 0.0, "uncovered_no_data_pct": 0.0, "scenes_found": 41, "scenes_too_cloudy": 6, "scenes_checked": 35, "scenes_with_clear_pixels": 30, "scenes_used": 5, "acquisition_days_loaded": 5, "acquisition_days_with_data": 5, "first_date_with_data": "2025-10-20", "last_date_with_data": "2026-01-04"}}'),
   ('00000000-0000-4000-a000-000000000003', 'completed', 'lisa', 'element84-s2',
    ST_MakeEnvelope(12.00, 45.00, 12.10, 45.10, 4326),
    '2025-01-11 08:00:00+00', '2026-01-11 08:00:00+00',
    '{"geocoded_name": "Sample Plain (synthetic)", "resolution_m": 30, "apply_cloud_mask": true}',
-   100, 'done', '2026-01-11 08:00:00+00', '2026-01-11 08:03:20+00'),
+   100,
+   'Completed: cloud-free data covers 91.2% of the requested area (6 acquisition days, 2025-02-17 to 2025-12-28).',
+   '2026-01-11 08:00:00+00', '2026-01-11 08:03:20+00',
+   '{"coverage": {"coverage_pct": 91.2, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 8.8, "uncovered_no_data_pct": 0.0, "scenes_found": 120, "scenes_too_cloudy": 22, "scenes_checked": 64, "scenes_with_clear_pixels": 51, "scenes_used": 6, "acquisition_days_loaded": 6, "acquisition_days_with_data": 6, "first_date_with_data": "2025-02-17", "last_date_with_data": "2025-12-28"}}'),
   ('00000000-0000-4000-a000-000000000004', 'completed', 'ndvi', 'element84-s2',
    ST_MakeEnvelope(11.00, 44.00, 11.10, 44.10, 4326),
    '2026-01-06 07:30:00+00', '2026-01-13 07:30:00+00',
    '{"geocoded_name": "Testville North (synthetic)", "resolution_m": 10, "apply_cloud_mask": true}',
-   100, 'done', '2026-01-13 07:30:00+00', '2026-01-13 07:30:45+00'),
+   100,
+   'Completed with partial coverage: cloud-free data covers only 41.5% of the requested area (1 acquisition day, 2026-01-09). Reason: 58.5% of the area was masked out (cloud, shadow, snow) on every day loaded (of the 9 scenes in the window, 6 were at least 95% cloudy and 2 of the other 3 had cloud-free pixels over the area). A longer time window may cover more of it.',
+   '2026-01-13 07:30:00+00', '2026-01-13 07:30:45+00',
+   '{"coverage": {"coverage_pct": 41.5, "low_coverage": true, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 58.5, "uncovered_no_data_pct": 0.0, "scenes_found": 9, "scenes_too_cloudy": 6, "scenes_checked": 3, "scenes_with_clear_pixels": 2, "scenes_used": 2, "acquisition_days_loaded": 1, "acquisition_days_with_data": 1, "first_date_with_data": "2026-01-09", "last_date_with_data": "2026-01-09"}}'),
   ('00000000-0000-4000-a000-000000000005', 'failed', 'ndwi', 'element84-s2',
    ST_MakeEnvelope(9.50, 46.00, 9.60, 46.10, 4326),
    '2025-12-15 12:00:00+00', '2026-01-14 12:00:00+00',
    '{"geocoded_name": "Nowhere Lake (synthetic)", "resolution_m": 20, "apply_cloud_mask": true}',
    30, 'No satellite data found. Try a wider date range or different area.',
-   '2026-01-14 12:00:00+00', '2026-01-14 12:00:30+00'),
+   '2026-01-14 12:00:00+00', '2026-01-14 12:00:30+00', NULL),
   ('00000000-0000-4000-a000-000000000006', 'pending', 'flood', 'element84-s2',
    ST_MakeEnvelope(12.05, 45.05, 12.15, 45.15, 4326),
    '2025-12-16 16:00:00+00', '2026-01-15 16:00:00+00',
    '{"geocoded_name": "Sample Plain (synthetic)", "resolution_m": 20, "apply_cloud_mask": true}',
-   0, NULL, '2026-01-15 16:00:00+00', NULL);
+   0, NULL, '2026-01-15 16:00:00+00', NULL, NULL);
 
 INSERT INTO alert_features (id, job_id, algorithm, severity, quadrant, geometry, centroid,
                             area_m2, perimeter_m, created_at)

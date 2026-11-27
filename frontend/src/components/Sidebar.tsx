@@ -385,7 +385,8 @@ export function Sidebar({
             </div>
             {job.message && (
               <p className={`text-xs ${
-                job.status === 'failed' ? 'text-red-600' : 'text-gray-600'
+                job.status === 'failed' ? 'text-red-600' :
+                job.result?.coverage?.low_coverage ? 'text-amber-700' : 'text-gray-600'
               }`}>
                 {job.message}
               </p>

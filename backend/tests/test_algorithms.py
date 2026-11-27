@@ -20,6 +20,11 @@ from eo_brain.algorithms.base import (
     Severity, MoranQuadrant,
     get_algorithm, ALGORITHMS,
 )
+from eo_brain.core.radiometry import REFLECTANCE_UNITS
+
+# Synthetic bands below are already surface reflectance and say so: a band
+# with no declared radiometry is refused (tests/test_radiometry.py).
+REFL = {"units": REFLECTANCE_UNITS}
 
 
 class TestLISAMathematics:
@@ -196,8 +201,8 @@ class TestLISAEdgeCases:
         """Algorithm should compute NDVI if only red/nir provided."""
         np.random.seed(42)
         ds = xr.Dataset({
-            "red": xr.DataArray(np.random.rand(20, 20).astype(np.float32) * 0.3, dims=["y", "x"]),
-            "nir": xr.DataArray(np.random.rand(20, 20).astype(np.float32) * 0.5 + 0.3, dims=["y", "x"]),
+            "red": xr.DataArray(np.random.rand(20, 20).astype(np.float32) * 0.3, dims=["y", "x"], attrs=REFL),
+            "nir": xr.DataArray(np.random.rand(20, 20).astype(np.float32) * 0.5 + 0.3, dims=["y", "x"], attrs=REFL),
         })
         
         algo = LISAAlgorithm()
@@ -250,8 +255,8 @@ class TestLazyExecution:
     def test_flood_returns_lazy(self, lazy_dataset):
         """Flood detection should also be lazy."""
         # Add green band for NDWI
-        lazy_dataset["green"] = lazy_dataset["ndvi"] * 0.8
-        lazy_dataset["nir"] = lazy_dataset["ndvi"]
+        lazy_dataset["green"] = (lazy_dataset["ndvi"] * 0.8).assign_attrs(REFL)
+        lazy_dataset["nir"] = lazy_dataset["ndvi"].copy().assign_attrs(REFL)
         
         algo = FloodDetectionAlgorithm()
         result = algo.run(lazy_dataset)
@@ -296,9 +301,9 @@ class TestFloodDetection:
     def test_mndwi_preferred_over_ndwi(self):
         """When SWIR available, should use MNDWI."""
         ds = xr.Dataset({
-            "green": xr.DataArray(np.full((10, 10), 0.3), dims=["y", "x"]),
-            "nir": xr.DataArray(np.full((10, 10), 0.2), dims=["y", "x"]),
-            "swir16": xr.DataArray(np.full((10, 10), 0.1), dims=["y", "x"]),
+            "green": xr.DataArray(np.full((10, 10), 0.3), dims=["y", "x"], attrs=REFL),
+            "nir": xr.DataArray(np.full((10, 10), 0.2), dims=["y", "x"], attrs=REFL),
+            "swir16": xr.DataArray(np.full((10, 10), 0.1), dims=["y", "x"], attrs=REFL),
         })
         
         algo = FloodDetectionAlgorithm()
@@ -310,8 +315,8 @@ class TestFloodDetection:
     def test_ndwi_fallback_without_swir(self):
         """Without SWIR, should fall back to NDWI."""
         ds = xr.Dataset({
-            "green": xr.DataArray(np.full((10, 10), 0.3), dims=["y", "x"]),
-            "nir": xr.DataArray(np.full((10, 10), 0.2), dims=["y", "x"]),
+            "green": xr.DataArray(np.full((10, 10), 0.3), dims=["y", "x"], attrs=REFL),
+            "nir": xr.DataArray(np.full((10, 10), 0.2), dims=["y", "x"], attrs=REFL),
         })
         
         algo = FloodDetectionAlgorithm()

@@ -5,6 +5,10 @@ Changes from v3:
 - STAC search retry with exponential backoff (network resilience)
 - Configurable HTTP timeout for STAC client
 - UTM zone boundary warning preserved
+- Radiometry per scene: each provider declares how a scene's digital numbers
+  become surface reflectance (``STACProvider.radiometry``, core.radiometry);
+  ``load_items`` keeps scenes with different rules in different time slices
+  and attaches each slice's rule to the data
 """
 
 from __future__ import annotations
@@ -21,12 +25,32 @@ import numpy as np
 from pystac_client import Client as STACClient
 from pystac import Item
 
+from eo_brain.core import radiometry as rad
+from eo_brain.core.radiometry import Radiometry, RadiometryUndetermined
+
 logger = logging.getLogger(__name__)
 
 # Retry config for STAC catalog queries
 _STAC_MAX_RETRIES = 3
 _STAC_BACKOFF_BASE = 1.5  # seconds, doubles each retry
 _STAC_TIMEOUT_SEC = 30
+
+_CLOUD_READS_CONFIGURED = False
+
+
+def configure_cloud_reads() -> None:
+    """
+    GDAL settings for reading COGs over HTTP, once per process (odc-stac's
+    cloud defaults: no directory listing on open, HTTP retries). Without them
+    GDAL lists the bucket "directory" of every asset it opens; on the Casentino
+    benchmark (10 scenes, 3 bands, 60 m) the load took 40 s instead of 15 s.
+    """
+    global _CLOUD_READS_CONFIGURED
+    if _CLOUD_READS_CONFIGURED:
+        return
+    from odc.stac import configure_rio
+    configure_rio(cloud_defaults=True)
+    _CLOUD_READS_CONFIGURED = True
 
 
 @dataclass(frozen=True)
@@ -113,6 +137,16 @@ class SearchParams:
 
 
 class STACProvider(ABC):
+    # Registry name (PROVIDERS), recorded in the job's radiometry block.
+    name: str = "custom"
+    # Storage type of the reflectance bands and of the cloud-mask band, and the
+    # mask band's nodata: given to the loader with the radiometry rule's nodata,
+    # so that loading does not depend on what each catalogue declares (Earth
+    # Search declares the same values; Planetary Computer declares none).
+    data_type: str = "uint16"
+    mask_data_type: str = "uint8"
+    mask_nodata: Optional[int] = None
+
     @property
     @abstractmethod
     def catalog_url(self) -> str: ...
@@ -155,8 +189,21 @@ class STACProvider(ABC):
     def sign_item(self, item: Item) -> Item:
         return item
 
+    def radiometry(self, item: Item) -> Radiometry:
+        """How this scene's DNs become surface reflectance (core.radiometry); raises RadiometryUndetermined."""
+        raise RadiometryUndetermined(f"{type(self).__name__} declares no radiometry rule")
+
 
 class Element84Sentinel2(STACProvider):
+    """
+    Earth Search ``sentinel-2-l2a``. Radiometry: ``radiometry.sentinel2_earth_search``
+    (the offset is removed by Earth Search when its flag says so; the assets'
+    ``raster:bands`` offset is not used). Checked on pixels against Planetary
+    Computer, scene S2B_32TPP_20261029 (README, "Radiometry").
+    """
+
+    name = "element84-s2"
+    mask_nodata = 0
     catalog_url = "https://earth-search.aws.element84.com/v1"
     default_collections = ["sentinel-2-l2a"]
     cloud_mask_band = "scl"
@@ -175,8 +222,20 @@ class Element84Sentinel2(STACProvider):
         # SCL: 4=vegetation, 5=bare soil, 6=water, 7=unclassified (sometimes useful)
         return scl.isin([4, 5, 6])
 
+    def radiometry(self, item: Item) -> Radiometry:
+        return rad.sentinel2_earth_search(item)
+
 
 class Element84Landsat(STACProvider):
+    """
+    Earth Search ``landsat-c2-l2``. Radiometry: USGS Collection 2 Level-2
+    surface reflectance, DN * 0.0000275 - 0.2. Does not load as configured:
+    the assets are in the requester-pays ``usgs-landsat`` bucket.
+    """
+
+    name = "element84-landsat"
+    mask_data_type = "uint16"
+    mask_nodata = 1   # QA_PIXEL fill
     catalog_url = "https://earth-search.aws.element84.com/v1"
     default_collections = ["landsat-c2-l2"]
     cloud_mask_band = "qa"
@@ -196,8 +255,19 @@ class Element84Landsat(STACProvider):
         shadow_bit = 1 << 4
         return ((qa_int & cloud_bit) == 0) & ((qa_int & shadow_bit) == 0)
 
+    def radiometry(self, item: Item) -> Radiometry:
+        return rad.landsat_c2_l2(item)
+
 
 class CopernicusSentinel2(STACProvider):
+    """
+    Copernicus Data Space. Radiometry: ESA's DNs, offset by processing
+    baseline (``radiometry.sentinel2_esa``). Does not load as configured
+    (asset keys, authentication).
+    """
+
+    name = "copernicus-s2"
+    mask_nodata = 0
     catalog_url = "https://catalogue.dataspace.copernicus.eu/stac"
     default_collections = ["sentinel-2-l2a"]
     cloud_mask_band = "scl"
@@ -214,8 +284,19 @@ class CopernicusSentinel2(STACProvider):
     def compute_cloud_mask(self, scl: xr.DataArray) -> xr.DataArray:
         return scl.isin([4, 5, 6])
 
+    def radiometry(self, item: Item) -> Radiometry:
+        return rad.sentinel2_esa(item)
+
 
 class PlanetaryComputerSentinel2(STACProvider):
+    """
+    Planetary Computer ``sentinel-2-l2a``: ESA's DNs as distributed, offset
+    by processing baseline (``radiometry.sentinel2_esa``). Checked on pixels:
+    DN = Earth Search DN + 1000 on the same scene.
+    """
+
+    name = "planetary-s2"
+    mask_nodata = 0
     catalog_url = "https://planetarycomputer.microsoft.com/api/stac/v1"
     default_collections = ["sentinel-2-l2a"]
     cloud_mask_band = "scl"
@@ -234,6 +315,9 @@ class PlanetaryComputerSentinel2(STACProvider):
 
     def compute_cloud_mask(self, scl: xr.DataArray) -> xr.DataArray:
         return scl.isin([4, 5])
+
+    def radiometry(self, item: Item) -> Radiometry:
+        return rad.sentinel2_esa(item)
 
     def sign_item(self, item: Item) -> Item:
         if self._pc is None:
@@ -281,6 +365,18 @@ class LoadResult:
     provider: STACProvider
     crs: str
     bbox: BBox
+    # Radiometry rule of each scene loaded (by id) and of each time slice.
+    scene_rules: Dict[str, Radiometry] = field(default_factory=dict)
+    slice_rules: List[Radiometry] = field(default_factory=list)
+    # Scenes left out because their rule could not be determined ({id, reason}).
+    refused: List[Dict[str, str]] = field(default_factory=list)
+
+    def radiometry_summary(self, refused: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+        """The job's ``radiometry`` block (radiometry.summarize)."""
+        return rad.summarize(
+            self.provider.name, self.scene_rules, [r.rule for r in self.slice_rules],
+            self.refused if refused is None else refused,
+        )
 
     def apply_cloud_mask(self) -> xr.Dataset:
         mask_band = self.provider.cloud_mask_band
@@ -362,47 +458,102 @@ class DataCube:
         bands: List[str],
         config: LoadConfig = None
     ) -> LoadResult:
+        """
+        Search, then load every item found whose radiometry is known (see
+        load_items). The others are left out with a warning and listed in
+        ``LoadResult.refused``.
+        """
+        items, refused = rad.split_by_radiometry(self.provider, self.search(params))
+        if refused:
+            logger.warning(f"{len(refused)} scenes left out, radiometry undetermined: {[r['id'] for r in refused]}")
+        result = self.load_items(items, params.bbox, bands, config)
+        result.refused = refused
+        return result
+
+    def load_items(
+        self,
+        items: List[Item],
+        bbox: BBox,
+        bands: List[str],
+        config: LoadConfig = None
+    ) -> LoadResult:
+        """
+        Load the given items over ``bbox`` (the API selects them first: core.scenes).
+
+        Every item needs a known radiometry (``provider.radiometry``; filter
+        with ``radiometry.split_by_radiometry`` first): an undetermined one
+        raises RadiometryUndetermined. The bands stay digital numbers; each
+        time slice carries its rule (``radiometry.attach_radiometry``) and
+        the algorithms convert per slice.
+        """
         config = config or LoadConfig()
 
-        items = self.search(params)
         if not items:
             logger.warning("No items found for query")
             return LoadResult(
                 data=xr.Dataset(),
                 provider=self.provider,
                 crs="",
-                bbox=params.bbox
+                bbox=bbox
             )
 
-        target_crs = config.resolve_crs(params.bbox)
+        target_crs = config.resolve_crs(bbox)
         logger.info(f"CRS: {target_crs}, resolution: {config.resolution_m}m, items: {len(items)}")
+
+        scene_rules = {item.id: self.provider.radiometry(item) for item in items}
+        nodata_values = {r.nodata for r in scene_rules.values()}
+        if len(nodata_values) != 1:
+            raise ValueError(f"Scenes with different nodata values cannot be loaded together: {nodata_values}")
+        if config.groupby != "solar_day":
+            raise ValueError(f"load_items groups scenes by solar day and radiometry, not {config.groupby!r}")
+        group, slice_rules = rad.radiometry_groups(items, scene_rules, bbox.center()[0])
 
         asset_map = self.provider.get_asset_mapping()
         provider_bands = [asset_map.get(b, b) for b in bands]
 
+        # Declared storage type and nodata of every band (the radiometry rule's
+        # nodata for reflectance), also where the catalogue declares none
+        # (Planetary Computer): the loader fuses the scenes of one day on them,
+        # and the coverage count reads the mask band's.
+        (nodata,) = nodata_values
+        asset_cfg = {}
+        for b in bands:
+            if b == self.provider.cloud_mask_band:
+                cfg = {"data_type": self.provider.mask_data_type}
+                if self.provider.mask_nodata is not None:
+                    cfg["nodata"] = self.provider.mask_nodata
+            else:
+                cfg = {"data_type": self.provider.data_type, "nodata": nodata}
+            asset_cfg[asset_map.get(b, b)] = cfg
+
         from odc.stac import load as odc_load
 
+        configure_cloud_reads()
         ds = odc_load(
             items,
             bands=provider_bands,
-            bbox=params.bbox.to_tuple(),
+            bbox=bbox.to_tuple(),
             resolution=config.resolution_m,
             crs=target_crs,
-            groupby=config.groupby,
+            groupby=group,
             chunks=config.chunks,
-            stac_cfg={"*": {"warnings": "ignore"}}
+            stac_cfg={"*": {"warnings": "ignore", "assets": asset_cfg}}
         )
+        ds = rad.attach_radiometry(ds, slice_rules)
 
         # Rename provider-specific band names to generic names
         reverse_map = {v: k for k, v in asset_map.items() if k in bands}
         rename_dict = {b: reverse_map.get(b, b) for b in ds.data_vars}
         ds = ds.rename(rename_dict)
 
-        logger.info(f"Loaded: dims={dict(ds.dims)}, vars={list(ds.data_vars)}")
+        logger.info(f"Loaded: dims={dict(ds.sizes)}, vars={list(ds.data_vars)}, "
+                    f"radiometry per slice: {[r.rule for r in slice_rules]}")
 
         return LoadResult(
             data=ds,
             provider=self.provider,
             crs=target_crs,
-            bbox=params.bbox
+            bbox=bbox,
+            scene_rules=scene_rules,
+            slice_rules=slice_rules,
         )

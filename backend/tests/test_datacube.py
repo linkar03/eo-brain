@@ -265,3 +265,147 @@ class TestProviders:
             assert hasattr(provider, 'get_asset_mapping')
             assert hasattr(provider, 'compute_cloud_mask')
             assert callable(provider.compute_cloud_mask)
+
+# ---------------------------------------------------------------- radiometry per scene
+
+import pystac
+
+from eo_brain.core import radiometry as rad
+from eo_brain.core.datacube import CopernicusSentinel2, PlanetaryComputerSentinel2, STACProvider
+from eo_brain.core.radiometry import RadiometryUndetermined
+from eo_brain.algorithms.base import NDVIAlgorithm
+
+CASENTINO = BBox(11.5721141, 43.5094014, 11.9865851, 43.8778958)
+
+
+def _item(id, day, props, hour=10):
+    dt = datetime.fromisoformat(f"{day}T{hour:02d}:16:00+00:00")
+    return pystac.Item(id=id, geometry=None, bbox=None, datetime=dt, properties=dict(props))
+
+
+class TestProviderRadiometry:
+    def test_names_match_registry(self):
+        for name, cls in PROVIDERS.items():
+            assert cls.name == name
+            assert callable(cls().radiometry)
+
+    def test_rules(self):
+        es = _item("S2B_32TPP_20261029_0_L2A", "2026-10-29",
+                   {"s2:processing_baseline": "05.13", "earthsearch:boa_offset_applied": True})
+        assert Element84Sentinel2().radiometry(es) is rad.S2_L2A_OFFSET_REMOVED
+        pc = _item("S2B_MSIL2A_20261029T101049_R022_T32TPP_20261029T125212", "2026-10-29",
+                   {"s2:processing_baseline": "05.13"})
+        assert PlanetaryComputerSentinel2().radiometry(pc) is rad.S2_L2A_BOA_OFFSET
+        cdse = _item("S2B_MSIL2A_20261029T101049_N0513_R022_T32TPP_20261029T125212.SAFE", "2026-10-29",
+                     {"processing:version": "05.13"})
+        assert CopernicusSentinel2().radiometry(cdse) is rad.S2_L2A_BOA_OFFSET
+        ls = _item("LC09_L2SP_192030_20261119_20261120_02_T2", "2026-11-19",
+                   {"landsat:collection_number": "02", "landsat:correction": "L2SP"})
+        assert Element84Landsat().radiometry(ls) is rad.LANDSAT_C2_L2_SR
+
+    def test_earth_search_flag_false_undetermined(self):
+        es = _item("S2B_32TPP_20221004_0_L2A", "2022-10-04",
+                   {"s2:processing_baseline": "04.00", "earthsearch:boa_offset_applied": False})
+        with pytest.raises(RadiometryUndetermined):
+            Element84Sentinel2().radiometry(es)
+
+    def test_undeclared_provider_refuses(self):
+        class Custom(Element84Sentinel2):
+            radiometry = STACProvider.radiometry
+        with pytest.raises(RadiometryUndetermined, match="declares no radiometry"):
+            Custom().radiometry(_item("x", "2026-10-29", {}))
+
+
+class TestLoadItemsRadiometry:
+    """load_items with odc-stac replaced by a stand-in that groups and fuses the way odc-stac does."""
+
+    @pytest.fixture
+    def fake_odc(self, monkeypatch):
+        calls = {}
+
+        def load(items, bands, bbox, resolution, crs, groupby, chunks, stac_cfg):
+            calls.update(items=items, bands=bands, groupby=groupby, stac_cfg=stac_cfg)
+            order = sorted(range(len(items)), key=lambda i: (groupby(items[i], None, i), items[i].datetime, items[i].id))
+            keys = []
+            groups = []
+            for i in order:
+                k = groupby(items[i], None, i)
+                if not keys or keys[-1] != k:
+                    keys.append(k)
+                    groups.append([])
+                groups[-1].append(items[i])
+            data = {b: (("time", "y", "x"), np.stack([np.full((2, 2), g[0].properties["test:dn"][b], np.uint16)
+                                                       for g in groups])) for b in bands}
+            times = [g[0].datetime.replace(tzinfo=None) for g in groups]
+            return xr.Dataset(data, coords={"time": np.array(times, dtype="datetime64[ns]")})
+
+        # A stand-in module for the test only (test_api.py replaces odc.stac at import time).
+        import sys
+        from types import SimpleNamespace
+        monkeypatch.setitem(sys.modules, "odc.stac", SimpleNamespace(load=load))
+        monkeypatch.setattr("eo_brain.core.datacube.configure_cloud_reads", lambda: None)
+        return calls
+
+    def test_mixed_rule_day_split_and_converted_per_slice(self, fake_odc):
+        # Same day: a 03.01 product and its 05.00 reprocessing (ESA DNs), plus another day.
+        dn = lambda red, nir: {"test:dn": {"B04": red, "B08": nir, "SCL": 4}}
+        items = [
+            _item("S2B_MSIL2A_20210707T101029_N0500_R022_T32TPP_20230101T000000", "2021-07-07",
+                  {"s2:processing_baseline": "05.00", **dn(1500, 5500)}),
+            _item("S2B_MSIL2A_20210707T101029_N0301_R022_T32TPP_20210707T131521", "2021-07-07",
+                  {"s2:processing_baseline": "03.01", **dn(500, 4500)}),
+            _item("S2A_MSIL2A_20210712T101031_N0500_R022_T32TPP_20230101T000000", "2021-07-12",
+                  {"s2:processing_baseline": "05.00", **dn(1500, 5500)}),
+        ]
+        cube = DataCube(provider=PlanetaryComputerSentinel2())
+        res = cube.load_items(items, CASENTINO, bands=["red", "nir", "scl"], config=LoadConfig(resolution_m=60))
+
+        ds = res.data
+        assert ds.sizes["time"] == 3
+        assert ds[rad.RULE].values.tolist() == ["s2-l2a-boa-offset", "s2-l2a-pre-pb04", "s2-l2a-boa-offset"]
+        assert fake_odc["stac_cfg"]["*"]["assets"] == {
+            "B04": {"data_type": "uint16", "nodata": 0},
+            "B08": {"data_type": "uint16", "nodata": 0},
+            "SCL": {"data_type": "uint8", "nodata": 0},
+        }
+        ndvi = NDVIAlgorithm._compute_ndvi(ds).values
+        np.testing.assert_allclose(ndvi, 0.8, atol=1e-6)   # every slice: red 0.05, nir 0.45
+
+        block = res.radiometry_summary([{"id": "x", "reason": "y"}])
+        by_rule = {r["rule"]: r for r in block["rules"]}
+        assert block["provider"] == "planetary-s2" and block["scenes_refused"] == 1
+        assert by_rule["s2-l2a-boa-offset"]["scenes"] == 2
+        assert by_rule["s2-l2a-boa-offset"]["acquisition_slices"] == 2
+        assert by_rule["s2-l2a-pre-pb04"]["scenes"] == 1
+
+    def test_homogeneous_days_are_one_slice_each(self, fake_odc):
+        props = {"s2:processing_baseline": "05.13", "earthsearch:boa_offset_applied": True,
+                 "test:dn": {"red": 500, "nir": 4500, "scl": 4}}
+        items = [_item("S2B_32TPP_20261029_0_L2A", "2026-10-29", props),
+                 _item("S2B_32TNP_20261029_0_L2A", "2026-10-29", props),
+                 _item("S2C_32TPP_20261103_0_L2A", "2026-11-03", props)]
+        res = DataCube(provider="element84-s2").load_items(items, CASENTINO, bands=["red", "nir", "scl"])
+        assert res.data.sizes["time"] == 2
+        assert [str(t)[:10] for t in res.data.time.values] == ["2026-10-29", "2026-11-03"]
+        assert set(res.data[rad.RULE].values) == {"s2-l2a-offset-removed"}
+        assert fake_odc["stac_cfg"]["*"]["assets"]["red"] == {"data_type": "uint16", "nodata": 0}
+
+    def test_undetermined_scene_is_not_loaded(self, fake_odc):
+        bad = _item("S2B_32TPP_20221004_0_L2A", "2022-10-04",
+                    {"s2:processing_baseline": "04.00", "earthsearch:boa_offset_applied": False})
+        with pytest.raises(RadiometryUndetermined):
+            DataCube(provider="element84-s2").load_items([bad], CASENTINO, bands=["red", "nir", "scl"])
+        assert "items" not in fake_odc
+
+    def test_load_leaves_out_undetermined_scenes(self, fake_odc, monkeypatch):
+        good = _item("S2B_32TPP_20261029_0_L2A", "2026-10-29",
+                     {"s2:processing_baseline": "05.13", "earthsearch:boa_offset_applied": True,
+                      "test:dn": {"red": 500, "nir": 4500, "scl": 4}})
+        bad = _item("S2B_32TPP_20221004_0_L2A", "2022-10-04",
+                    {"s2:processing_baseline": "04.00", "earthsearch:boa_offset_applied": False})
+        monkeypatch.setattr(DataCube, "search", lambda self, params: [good, bad])
+        params = SearchParams(bbox=CASENTINO, time_range=TimeRange(start=datetime(2022, 1, 1), end=datetime(2026, 11, 27)))
+        res = DataCube(provider="element84-s2").load(params, bands=["red", "nir", "scl"])
+        assert [it.id for it in fake_odc["items"]] == [good.id]
+        assert [r["id"] for r in res.refused] == [bad.id]
+        assert res.radiometry_summary()["scenes_refused"] == 1

@@ -62,7 +62,9 @@ from evals.provider_guard import (
     run_cases,
 )
 from evals.scoring import CaseResult, errored_case, not_run_case, score_case, summarize
-from evals.stubs import FIXED_NOW, InMemoryJobRepository, StubDataAgent, StubGeocoder
+from evals.stubs import (
+    FIXED_NOW, InMemoryJobRepository, StubDataAgent, StubGeocoder, load_recorded_searches,
+)
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CASES = HERE / "cases.v1.yaml"
@@ -95,7 +97,20 @@ def load_dataset(path: Path) -> Dict[str, Any]:
     dupes = {i for i in ids if ids.count(i) > 1}
     if dupes:
         raise SystemExit(f"{path}: duplicate case ids {sorted(dupes)}")
+    if data.get("recorded_searches"):
+        # Recorded Nominatim responses, relative to the dataset; stored absolute
+        # so that a copy of the dataset written elsewhere still finds them.
+        rec = (Path(path).parent / data["recorded_searches"]).resolve()
+        if not rec.is_file():
+            raise SystemExit(f"{path}: recorded_searches file not found: {rec}")
+        data["recorded_searches"] = str(rec)
     return data
+
+
+def recorded_searches(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The dataset's recorded Nominatim responses (searched after the gazetteer), or None."""
+    path = data.get("recorded_searches")
+    return load_recorded_searches(path) if path else None
 
 
 def _model_turn(step: Dict[str, Any]) -> ModelTurn:
@@ -132,7 +147,8 @@ def scripted_steps(turn: Dict[str, Any]) -> List[Any]:
     return [_model_turn(script)]
 
 
-def run_case(case: Dict[str, Any], *, provider, models: List[str], gazetteer, sleep) -> CaseResult:
+def run_case(case: Dict[str, Any], *, provider, models: List[str], gazetteer, sleep,
+             recorded: Optional[Dict[str, Any]] = None) -> CaseResult:
     turns = [*case.get("setup", []), case]
     if getattr(provider, "name", "") == "scripted":
         provider = ScriptedProvider([step for t in turns for step in scripted_steps(t)])
@@ -141,7 +157,7 @@ def run_case(case: Dict[str, Any], *, provider, models: List[str], gazetteer, sl
         provider,
         models=models,
         job_repo=InMemoryJobRepository(),
-        geocode=StubGeocoder(gazetteer),
+        geocode=StubGeocoder(gazetteer, recorded),
         sessions=SessionStore(),
         clock=lambda: FIXED_NOW,
         sleep=sleep,
@@ -246,9 +262,11 @@ def run_tools_suite(args, provider, models, sleep, banner, guard: Optional[Provi
     print(f"suite: tools - dataset: {args.cases.name} (version {data['version']}, {len(cases)} cases)\n")
 
     started = datetime.now(timezone.utc)
+    recorded = recorded_searches(data)
     results, stop_reason = run_cases(
         cases,
-        lambda c: run_case(c, provider=provider, models=models, gazetteer=data["gazetteer"], sleep=sleep),
+        lambda c: run_case(c, provider=provider, models=models, gazetteer=data["gazetteer"], sleep=sleep,
+                           recorded=recorded),
         not_run=not_run_case,
         guard=guard,
         case_retries=args.case_retries if guard is not None else 0,
@@ -262,6 +280,10 @@ def run_tools_suite(args, provider, models, sleep, banner, guard: Optional[Provi
         "schema": "agent-tool-call-eval-report/v2",
         **_run_meta(args, models, banner, guard, summary, stop_reason, started),
         "dataset": {"path": args.cases.name, "version": data["version"], "sha256": _sha256(args.cases)},
+        **({"recorded_searches": {
+            "path": os.path.relpath(data["recorded_searches"], HERE),
+            "sha256": _sha256(Path(data["recorded_searches"])),
+        }} if data.get("recorded_searches") else {}),
         "summary": summary,
         "cases": [r.to_dict() for r in results],
     })

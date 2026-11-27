@@ -120,7 +120,7 @@ def _lon_to_utm_zone(lon: float) -> int:
     return int((lon + 180) / 6) + 1
 
 
-def validate_bbox(bbox: List[float]) -> List[float]:
+def validate_bbox(bbox: List[float], warn: bool = True) -> List[float]:
     """
     Full bbox validation with actionable error messages.
 
@@ -181,7 +181,7 @@ def validate_bbox(bbox: List[float]) -> List[float]:
 
     zone_west = _lon_to_utm_zone(west)
     zone_east = _lon_to_utm_zone(east)
-    if zone_west != zone_east:
+    if warn and zone_west != zone_east:
         logger.warning(
             f"BBox crosses UTM zones {zone_west}-{zone_east}. "
             f"Edge distortion may occur. Consider splitting into two analyses."

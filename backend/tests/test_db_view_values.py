@@ -35,6 +35,8 @@ from sqlglot import exp
 
 import eo_brain
 from eo_brain.algorithms.base import ALGORITHMS, MoranQuadrant, Severity
+from eo_brain.core.coverage import LOW_COVERAGE_PCT
+from eo_brain.core.scenes import DEFAULT_SELECTION
 from evals.db import create_scratch_db, drop_scratch_db
 
 ADMIN_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
@@ -215,6 +217,30 @@ def test_values_present_in_the_seed_are_listed(conn, comments, expected):
         present = {r[0] for r in _fetch(conn, f"SELECT DISTINCT {col} FROM agent.{view} WHERE {col} IS NOT NULL")}
         assert present, f"seed has no value for agent.{view}.{col}"
         assert present <= documented_values(comments[(view, col)]), (view, col, present)
+
+
+def test_coverage_comments_state_the_python_thresholds(comments):
+    """The coverage columns quote two thresholds; they must be the ones the pipeline uses."""
+    low = comments[("analyses", "low_coverage")]
+    assert f"coverage_pct is below {LOW_COVERAGE_PCT:g}:" in low, low
+    cloudy = comments[("analyses", "scenes_too_cloudy")]
+    assert f"was {DEFAULT_SELECTION.loose_cloud_bound:g} percent or more" in cloudy, cloudy
+
+
+def test_coverage_columns_read_the_seeded_results(conn):
+    rows = _fetch(conn, """
+        SELECT right(analysis_id::text, 3), coverage_pct, low_coverage, uncovered_masked_pct,
+               scenes_found, scenes_used, acquisition_days, first_acquisition::text
+        FROM agent.analyses ORDER BY analysis_id
+    """)
+    assert rows == [
+        ("001", 97.8, False, 2.2, 14, 4, 4, "2025-12-14"),
+        ("002", 100.0, False, 0.0, 41, 5, 5, "2025-10-20"),
+        ("003", 91.2, False, 8.8, 120, 6, 6, "2025-02-17"),
+        ("004", 41.5, True, 58.5, 9, 2, 1, "2026-01-09"),
+        ("005", None, None, None, None, None, None, None),
+        ("006", None, None, None, None, None, None, None),
+    ]
 
 
 @pytest.mark.parametrize(

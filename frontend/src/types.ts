@@ -28,6 +28,21 @@ export interface VectorStats {
   error?: string;
 }
 
+/** result.coverage of a completed job (backend: eo_brain/core/coverage.py). */
+export interface JobCoverage {
+  coverage_pct: number;
+  low_coverage: boolean;
+  low_coverage_below_pct: number;
+  uncovered_masked_pct: number;
+  uncovered_no_data_pct: number;
+  scenes_found: number | null;
+  scenes_used: number | null;
+  acquisition_days_with_data: number;
+  first_date_with_data: string | null;
+  last_date_with_data: string | null;
+  [key: string]: unknown;
+}
+
 export interface JobResult {
   summary: Record<string, {
     min: number | null;
@@ -50,6 +65,7 @@ export interface JobResult {
   tile_url: string;
   vector_url?: string;
   vector_stats?: VectorStats;
+  coverage?: JobCoverage;
 }
 
 export interface JobStatusResponse {

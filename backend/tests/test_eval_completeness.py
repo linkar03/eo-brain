@@ -358,4 +358,5 @@ def test_sql_suite_is_skipped_without_a_database_once_the_quota_is_gone(tmp_path
     ])
     data = json.loads(sql_report.read_text(encoding="utf-8"))
     assert code == runner.EXIT_INCOMPLETE
-    assert data["complete"] is False and data["counts"]["not_run"] == data["counts"]["cases"] == 18
+    n_cases = len(sql_suite.load_sql_dataset(sql_suite.__file__.replace("sql_suite.py", "sql_cases.v1.yaml"))["cases"])
+    assert data["complete"] is False and data["counts"]["not_run"] == data["counts"]["cases"] == n_cases

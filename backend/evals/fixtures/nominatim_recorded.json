@@ -1,0 +1,1364 @@
+{
+ "_about": "Responses of nominatim.openstreetmap.org/search recorded on 2026-11-27 with the app's request (geopy Nominatim, user agent eo-brain/1.0, exactly_one=False, limit=10, language=en, addressdetails=1, namedetails=1). Fields the resolver does not read are dropped, and namedetails keeps only the English and Italian names and the alt/official/short/old names. Keys are the query text as sent.",
+ "_attribution": "Data (c) OpenStreetMap contributors, ODbL 1.0, https://www.openstreetmap.org/copyright",
+ "responses": {
+  "vallata del Casentino": [],
+  "Casentino": [
+   {
+    "osm_type": "node",
+    "osm_id": 777998083,
+    "lat": "42.2790611",
+    "lon": "13.5098204",
+    "class": "place",
+    "type": "village",
+    "place_rank": 19,
+    "importance": 0.40473259167301984,
+    "addresstype": "village",
+    "name": "Casentino",
+    "display_name": "Casentino, Sant'Eusanio Forconese, L'Aquila, Abruzzo, 67040, Italy",
+    "address": {
+     "village": "Casentino",
+     "city": "Sant'Eusanio Forconese",
+     "county": "L'Aquila",
+     "ISO3166-2-lvl6": "IT-AQ",
+     "state": "Abruzzo",
+     "ISO3166-2-lvl4": "IT-65",
+     "postcode": "67040",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Casentino"
+    },
+    "boundingbox": [
+     "42.2590611",
+     "42.2990611",
+     "13.4898204",
+     "13.5298204"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 19483128,
+    "lat": "43.6936379",
+    "lon": "11.7956868",
+    "class": "place",
+    "type": "region",
+    "place_rank": 18,
+    "importance": 0.39589062692589233,
+    "addresstype": "region",
+    "name": "Casentino",
+    "display_name": "Casentino, Arezzo, Tuscany, Italy",
+    "address": {
+     "region": "Casentino",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Casentino"
+    },
+    "boundingbox": [
+     "43.5094014",
+     "43.8778958",
+     "11.5721141",
+     "11.9865851"
+    ]
+   }
+  ],
+  "casentino arezzo, italia": [
+   {
+    "osm_type": "way",
+    "osm_id": 26547361,
+    "lat": "43.7433245",
+    "lon": "11.7069363",
+    "class": "highway",
+    "type": "secondary",
+    "place_rank": 26,
+    "importance": 0.05338915007248032,
+    "addresstype": "secondary",
+    "name": "Viale Italia",
+    "display_name": "Viale Italia, Capezzi, Strada in Casentino, Castel San Niccolò, Unione dei Comuni Montani del Casentino, Arezzo, Tuscany, 52018, Italy",
+    "address": {
+     "road": "Viale Italia",
+     "hamlet": "Capezzi",
+     "village": "Strada in Casentino",
+     "municipality": "Castel San Niccolò",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "postcode": "52018",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "ref": "SP70",
+     "name": "Viale Italia"
+    },
+    "boundingbox": [
+     "43.7424132",
+     "43.7442042",
+     "11.7053927",
+     "11.7084983"
+    ]
+   },
+   {
+    "osm_type": "way",
+    "osm_id": 27091965,
+    "lat": "43.7443748",
+    "lon": "11.7087973",
+    "class": "highway",
+    "type": "secondary",
+    "place_rank": 26,
+    "importance": 0.05338915007248032,
+    "addresstype": "secondary",
+    "name": "Viale Italia",
+    "display_name": "Viale Italia, Torre, Strada in Casentino, Castel San Niccolò, Unione dei Comuni Montani del Casentino, Arezzo, Tuscany, 52018, Italy",
+    "address": {
+     "road": "Viale Italia",
+     "hamlet": "Torre",
+     "village": "Strada in Casentino",
+     "municipality": "Castel San Niccolò",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "postcode": "52018",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "ref": "SP70",
+     "name": "Viale Italia"
+    },
+    "boundingbox": [
+     "43.7442042",
+     "43.7445461",
+     "11.7084983",
+     "11.7090959"
+    ]
+   },
+   {
+    "osm_type": "way",
+    "osm_id": 26538426,
+    "lat": "43.7428611",
+    "lon": "11.7057088",
+    "class": "highway",
+    "type": "residential",
+    "place_rank": 26,
+    "importance": 0.05338915007248032,
+    "addresstype": "residential",
+    "name": "Viale Italia",
+    "display_name": "Viale Italia, Capezzi, Strada in Casentino, Castel San Niccolò, Unione dei Comuni Montani del Casentino, Arezzo, Tuscany, 52018, Italy",
+    "address": {
+     "road": "Viale Italia",
+     "hamlet": "Capezzi",
+     "village": "Strada in Casentino",
+     "municipality": "Castel San Niccolò",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "postcode": "52018",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Viale Italia"
+    },
+    "boundingbox": [
+     "43.7427375",
+     "43.7429021",
+     "11.7053397",
+     "11.7060554"
+    ]
+   },
+   {
+    "osm_type": "way",
+    "osm_id": 26538445,
+    "lat": "43.7446811",
+    "lon": "11.7091335",
+    "class": "highway",
+    "type": "service",
+    "place_rank": 27,
+    "importance": 0.04005581673914701,
+    "addresstype": "road",
+    "name": "Viale Italia",
+    "display_name": "Viale Italia, Torre, Strada in Casentino, Castel San Niccolò, Unione dei Comuni Montani del Casentino, Arezzo, Tuscany, 52018, Italy",
+    "address": {
+     "road": "Viale Italia",
+     "hamlet": "Torre",
+     "village": "Strada in Casentino",
+     "municipality": "Castel San Niccolò",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "postcode": "52018",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Viale Italia"
+    },
+    "boundingbox": [
+     "43.7446127",
+     "43.7447362",
+     "11.7090511",
+     "11.7092046"
+    ]
+   },
+   {
+    "osm_type": "node",
+    "osm_id": 13789369690,
+    "lat": "43.7232394",
+    "lon": "11.7655742",
+    "class": "tourism",
+    "type": "attraction",
+    "place_rank": 30,
+    "importance": 5.682230868996746e-05,
+    "addresstype": "tourism",
+    "name": "Poppi - Nella lista I Borghi più Belli d'Italia",
+    "display_name": "Poppi - Nella lista I Borghi più Belli d'Italia, Via Cavour, Ponte a Poppi, Poppi, Unione dei Comuni Montani del Casentino, Arezzo, Tuscany, 52014, Italy",
+    "address": {
+     "tourism": "Poppi - Nella lista I Borghi più Belli d'Italia",
+     "road": "Via Cavour",
+     "village": "Ponte a Poppi",
+     "municipality": "Unione dei Comuni Montani del Casentino",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "postcode": "52014",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Poppi - Nella lista I Borghi più Belli d'Italia"
+    },
+    "boundingbox": [
+     "43.7231894",
+     "43.7232894",
+     "11.7655242",
+     "11.7656242"
+    ]
+   },
+   {
+    "osm_type": "node",
+    "osm_id": 10123859373,
+    "lat": "43.7104647",
+    "lon": "11.9318934",
+    "class": "natural",
+    "type": "tree",
+    "place_rank": 30,
+    "importance": 5.607003891046033e-05,
+    "addresstype": "natural",
+    "name": "Abete bianco più alto d'Italia",
+    "display_name": "Abete bianco più alto d'Italia, Piazzale o quadrante, La Verna, Chiusi della Verna, Unione dei Comuni Montani del Casentino, Arezzo, Tuscany, Italy",
+    "address": {
+     "natural": "Abete bianco più alto d'Italia",
+     "road": "Piazzale o quadrante",
+     "hamlet": "La Verna",
+     "village": "Chiusi della Verna",
+     "municipality": "Unione dei Comuni Montani del Casentino",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Abete bianco più alto d'Italia"
+    },
+    "boundingbox": [
+     "43.7104147",
+     "43.7105147",
+     "11.9318434",
+     "11.9319434"
+    ]
+   },
+   {
+    "osm_type": "node",
+    "osm_id": 13790721465,
+    "lat": "43.6766818",
+    "lon": "11.7111582",
+    "class": "tourism",
+    "type": "attraction",
+    "place_rank": 30,
+    "importance": 5.545204852364412e-05,
+    "addresstype": "tourism",
+    "name": "Raggiolo - Nella lista \"I Borghi più belli d'Italia\"",
+    "display_name": "Raggiolo - Nella lista \"I Borghi più belli d'Italia\", Via G.Matteotti, Raggiolo, Ortignano Raggiolo, Unione dei Comuni Montani del Casentino, Arezzo, Tuscany, Italy",
+    "address": {
+     "tourism": "Raggiolo - Nella lista \"I Borghi più belli d'Italia\"",
+     "road": "Via G.Matteotti",
+     "village": "Raggiolo",
+     "municipality": "Unione dei Comuni Montani del Casentino",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Raggiolo - Nella lista \"I Borghi più belli d'Italia\""
+    },
+    "boundingbox": [
+     "43.6766318",
+     "43.6767318",
+     "11.7111082",
+     "11.7112082"
+    ]
+   }
+  ],
+  "Casentino, Arezzo, Italia": [
+   {
+    "osm_type": "relation",
+    "osm_id": 19483128,
+    "lat": "43.6936379",
+    "lon": "11.7956868",
+    "class": "place",
+    "type": "region",
+    "place_rank": 18,
+    "importance": 0.39589062692589233,
+    "addresstype": "region",
+    "name": "Casentino",
+    "display_name": "Casentino, Arezzo, Tuscany, Italy",
+    "address": {
+     "region": "Casentino",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Casentino"
+    },
+    "boundingbox": [
+     "43.5094014",
+     "43.8778958",
+     "11.5721141",
+     "11.9865851"
+    ]
+   }
+  ],
+  "Firenze": [
+   {
+    "osm_type": "relation",
+    "osm_id": 42602,
+    "lat": "43.7697955",
+    "lon": "11.2556404",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 16,
+    "importance": 0.7721083386731102,
+    "addresstype": "city",
+    "name": "Florence",
+    "display_name": "Florence, Tuscany, Italy",
+    "address": {
+     "city": "Florence",
+     "county": "Florence",
+     "ISO3166-2-lvl6": "IT-FI",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Firenze",
+     "name:en": "Florence",
+     "name:it": "Firenze",
+     "alt_name:da": "Florens",
+     "alt_name:gl": "Florenza",
+     "int_name": "Firenze",
+     "old_name": "Florentia"
+    },
+    "boundingbox": [
+     "43.7258716",
+     "43.8354631",
+     "11.1497598",
+     "11.3389044"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 42472,
+    "lat": "43.8456527",
+    "lon": "11.3743092",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.5310380690255344,
+    "addresstype": "county",
+    "name": "Florence",
+    "display_name": "Florence, Tuscany, Italy",
+    "address": {
+     "county": "Florence",
+     "ISO3166-2-lvl6": "IT-FI",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Firenze",
+     "name:en": "Florence",
+     "name:it": "Firenze",
+     "short_name": "FI",
+     "alt_name:gl": "Cidade metropolitana de Florenza",
+     "official_name": "Città Metropolitana di Firenze"
+    },
+    "boundingbox": [
+     "43.4515008",
+     "44.2398101",
+     "10.7111211",
+     "11.7530586"
+    ]
+   }
+  ],
+  "Florence, Italy": [
+   {
+    "osm_type": "relation",
+    "osm_id": 42602,
+    "lat": "43.7697955",
+    "lon": "11.2556404",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 16,
+    "importance": 0.7721083386731102,
+    "addresstype": "city",
+    "name": "Florence",
+    "display_name": "Florence, Tuscany, Italy",
+    "address": {
+     "city": "Florence",
+     "county": "Florence",
+     "ISO3166-2-lvl6": "IT-FI",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Firenze",
+     "name:en": "Florence",
+     "name:it": "Firenze",
+     "alt_name:da": "Florens",
+     "alt_name:gl": "Florenza",
+     "int_name": "Firenze",
+     "old_name": "Florentia"
+    },
+    "boundingbox": [
+     "43.7258716",
+     "43.8354631",
+     "11.1497598",
+     "11.3389044"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 42472,
+    "lat": "43.8456527",
+    "lon": "11.3743092",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.5310380690255344,
+    "addresstype": "county",
+    "name": "Florence",
+    "display_name": "Florence, Tuscany, Italy",
+    "address": {
+     "county": "Florence",
+     "ISO3166-2-lvl6": "IT-FI",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Firenze",
+     "name:en": "Florence",
+     "name:it": "Firenze",
+     "short_name": "FI",
+     "alt_name:gl": "Cidade metropolitana de Florenza",
+     "official_name": "Città Metropolitana di Firenze"
+    },
+    "boundingbox": [
+     "43.4515008",
+     "44.2398101",
+     "10.7111211",
+     "11.7530586"
+    ]
+   }
+  ],
+  "Lago di Garda": [
+   {
+    "osm_type": "relation",
+    "osm_id": 8569,
+    "lat": "45.6624314",
+    "lon": "10.6861569",
+    "class": "water",
+    "type": "lake",
+    "place_rank": 20,
+    "importance": 0.5548486299925198,
+    "addresstype": "lake",
+    "name": "Lake Garda",
+    "display_name": "Lake Garda, Brescia, Lombardy, Italy",
+    "address": {
+     "lake": "Lake Garda",
+     "county": "Brescia",
+     "ISO3166-2-lvl6": "IT-BS",
+     "region": "Lombardy",
+     "ISO3166-2-lvl4": "IT-25",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Lago di Garda",
+     "name:en": "Lake Garda",
+     "name:it": "Lago di Garda",
+     "alt_name": "Benaco",
+     "loc_name": "Lach de Garda",
+     "old_name:de": "Gartsee"
+    },
+    "boundingbox": [
+     "45.4403205",
+     "45.8848213",
+     "10.5109103",
+     "10.8768975"
+    ]
+   }
+  ],
+  "Arno": [
+   {
+    "osm_type": "relation",
+    "osm_id": 2535730,
+    "lat": "43.7664527",
+    "lon": "11.2573196",
+    "class": "waterway",
+    "type": "river",
+    "place_rank": 18,
+    "importance": 0.5357702626684144,
+    "addresstype": "river",
+    "name": "Arno",
+    "display_name": "Arno, Tuscany, Italy",
+    "address": {
+     "river": "Arno",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Arno"
+    },
+    "boundingbox": [
+     "43.4956719",
+     "43.8695150",
+     "10.2745086",
+     "11.8785741"
+    ]
+   },
+   {
+    "osm_type": "way",
+    "osm_id": 1247316360,
+    "lat": "43.8695194",
+    "lon": "11.6946462",
+    "class": "waterway",
+    "type": "stream",
+    "place_rank": 22,
+    "importance": 0.5357702626684144,
+    "addresstype": "stream",
+    "name": "Arno",
+    "display_name": "Arno, Pratovecchio Stia, Arezzo, Tuscany, Italy",
+    "address": {
+     "stream": "Arno",
+     "municipality": "Pratovecchio Stia",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Arno"
+    },
+    "boundingbox": [
+     "43.8694898",
+     "43.8696423",
+     "11.6941948",
+     "11.6951174"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 3825899,
+    "lat": "7.0811720",
+    "lon": "171.6562687",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 16,
+    "importance": 0.43794231461514876,
+    "addresstype": "island",
+    "name": "Arno",
+    "display_name": "Arno, Ratak Chain, Marshall Islands",
+    "address": {
+     "island": "Arno",
+     "ISO3166-2-lvl8": "MH-ARN",
+     "state": "Ratak Chain",
+     "ISO3166-2-lvl4": "MH-T",
+     "country": "Marshall Islands",
+     "country_code": "mh"
+    },
+    "namedetails": {
+     "name": "Arṇo",
+     "name:en": "Arno"
+    },
+    "boundingbox": [
+     "6.5742500",
+     "7.7992987",
+     "171.3728984",
+     "172.2271472"
+    ]
+   },
+   {
+    "osm_type": "node",
+    "osm_id": 151608346,
+    "lat": "36.9397768",
+    "lon": "-92.7471136",
+    "class": "place",
+    "type": "hamlet",
+    "place_rank": 20,
+    "importance": 0.31827171020639217,
+    "addresstype": "hamlet",
+    "name": "Arno",
+    "display_name": "Arno, Douglas County, Missouri, United States",
+    "address": {
+     "hamlet": "Arno",
+     "county": "Douglas County",
+     "state": "Missouri",
+     "ISO3166-2-lvl4": "US-MO",
+     "country": "United States",
+     "country_code": "us"
+    },
+    "namedetails": {
+     "name": "Arno"
+    },
+    "boundingbox": [
+     "36.9197768",
+     "36.9597768",
+     "-92.7671136",
+     "-92.7271136"
+    ]
+   },
+   {
+    "osm_type": "node",
+    "osm_id": 154304843,
+    "lat": "36.9273179",
+    "lon": "-82.8121055",
+    "class": "place",
+    "type": "hamlet",
+    "place_rank": 20,
+    "importance": 0.24930035976498935,
+    "addresstype": "hamlet",
+    "name": "Arno",
+    "display_name": "Arno, Wise County, Virginia, 24215, United States",
+    "address": {
+     "hamlet": "Arno",
+     "county": "Wise County",
+     "state": "Virginia",
+     "ISO3166-2-lvl4": "US-VA",
+     "postcode": "24215",
+     "country": "United States",
+     "country_code": "us"
+    },
+    "namedetails": {
+     "name": "Arno"
+    },
+    "boundingbox": [
+     "36.9073179",
+     "36.9473179",
+     "-82.8321055",
+     "-82.7921055"
+    ]
+   },
+   {
+    "osm_type": "node",
+    "osm_id": 14384535641,
+    "lat": "-10.1667905",
+    "lon": "-48.3443052",
+    "class": "place",
+    "type": "suburb",
+    "place_rank": 19,
+    "importance": 0.1467253704127565,
+    "addresstype": "suburb",
+    "name": "Noroeste",
+    "display_name": "Noroeste, ARNO 32 (305 N), NOROESTE, Palmas, Tocantins, North Region, 77001-353, Brazil",
+    "address": {
+     "suburb": "Noroeste",
+     "city_district": "NOROESTE",
+     "city": "Palmas",
+     "state": "Tocantins",
+     "ISO3166-2-lvl4": "BR-TO",
+     "region": "North Region",
+     "postcode": "77001-353",
+     "country": "Brazil",
+     "country_code": "br"
+    },
+    "namedetails": {
+     "name": "Noroeste",
+     "short_name": "ARNO",
+     "official_name": "Área Residencial Noroeste"
+    },
+    "boundingbox": [
+     "-10.1867905",
+     "-10.1467905",
+     "-48.3643052",
+     "-48.3243052"
+    ]
+   },
+   {
+    "osm_type": "node",
+    "osm_id": 8144323507,
+    "lat": "7.0630059",
+    "lon": "171.5553478",
+    "class": "place",
+    "type": "village",
+    "place_rank": 19,
+    "importance": 0.14670416800183103,
+    "addresstype": "village",
+    "name": "Arno",
+    "display_name": "Arno, Ratak Chain, Marshall Islands",
+    "address": {
+     "village": "Arno",
+     "island": "Arno",
+     "ISO3166-2-lvl8": "MH-ARN",
+     "state": "Ratak Chain",
+     "ISO3166-2-lvl4": "MH-T",
+     "country": "Marshall Islands",
+     "country_code": "mh"
+    },
+    "namedetails": {
+     "name": "Arṇo",
+     "name:en": "Arno"
+    },
+    "boundingbox": [
+     "7.0430059",
+     "7.0830059",
+     "171.5353478",
+     "171.5753478"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 45836,
+    "lat": "45.7190562",
+    "lon": "8.8143443",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 16,
+    "importance": 0.5421420560597371,
+    "addresstype": "village",
+    "name": "Solbiate Arno",
+    "display_name": "Solbiate Arno, Varese, Lombardy, 21048, Italy",
+    "address": {
+     "village": "Solbiate Arno",
+     "county": "Varese",
+     "ISO3166-2-lvl6": "IT-VA",
+     "region": "Lombardy",
+     "ISO3166-2-lvl4": "IT-25",
+     "postcode": "21048",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Solbiate Arno"
+    },
+    "boundingbox": [
+     "45.7076822",
+     "45.7311316",
+     "8.8042581",
+     "8.8274680"
+    ]
+   }
+  ],
+  "Valencia": [
+   {
+    "osm_type": "relation",
+    "osm_id": 344953,
+    "lat": "39.4697065",
+    "lon": "-0.3763353",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 16,
+    "importance": 0.7306288056783602,
+    "addresstype": "city",
+    "name": "Valencia",
+    "display_name": "Valencia, Comarca de València, Valencia, Valencian Community, Spain",
+    "address": {
+     "city": "Valencia",
+     "county": "Comarca de València",
+     "province": "Valencia",
+     "ISO3166-2-lvl6": "ES-V",
+     "state": "Valencian Community",
+     "ISO3166-2-lvl4": "ES-VC",
+     "country": "Spain",
+     "country_code": "es"
+    },
+    "namedetails": {
+     "name": "València",
+     "name:en": "Valencia",
+     "name:it": "Valencia",
+     "int_name": "Valencia",
+     "short_name": "VLC",
+     "alt_name:el": "Βαλένσια",
+     "alt_name:tr": "Valensiya",
+     "alt_name:zh": "巴倫西亞",
+     "old_name:tr": "Belensiye",
+     "official_name": "València",
+     "old_name:-2017": "Valencia",
+     "alt_name:zh-Hans": "巴伦西亚",
+     "alt_name:zh-Hant": "巴倫西亞"
+    },
+    "boundingbox": [
+     "39.2784496",
+     "39.5666090",
+     "-0.4325512",
+     "-0.2725205"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 349043,
+    "lat": "39.6819591",
+    "lon": "-0.7654406",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 8,
+    "importance": 0.6906579481640391,
+    "addresstype": "state",
+    "name": "Valencian Community",
+    "display_name": "Valencian Community, Spain",
+    "address": {
+     "state": "Valencian Community",
+     "ISO3166-2-lvl4": "ES-VC",
+     "country": "Spain",
+     "country_code": "es"
+    },
+    "namedetails": {
+     "name": "Comunitat Valenciana",
+     "name:en": "Valencian Community",
+     "alt_name": "País Valencià",
+     "old_name": "Regne de València",
+     "ref": "VC",
+     "alt_name:ca": "País Valencià",
+     "alt_name:es": "País Valenciano",
+     "short_name:cs": "Valencie",
+     "name:it": "Comunità Valenzana",
+     "int_name": "Valencia",
+     "official_name:ar": "منطقة بلنسية",
+     "official_name:be": "Валенсійская супольнасць",
+     "official_name:ca": "Comunitat Valenciana",
+     "official_name:es": "Comunidad Valenciana",
+     "alt_name:be": "Валенсійская краіна",
+     "alt_name:en": "Valencian Country",
+     "alt_name:ru": "Валенсийская страна",
+     "official_name": "Comunitat Valenciana",
+     "official_name:ru": "Валенсийское сообщество"
+    },
+    "boundingbox": [
+     "37.8437887",
+     "40.7886312",
+     "-1.5289448",
+     "0.6903174"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 349000,
+    "lat": "39.3342058",
+    "lon": "-0.7973474",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 10,
+    "importance": 0.6197091957583227,
+    "addresstype": "province",
+    "name": "Valencia",
+    "display_name": "Valencia, Valencian Community, Spain",
+    "address": {
+     "province": "Valencia",
+     "ISO3166-2-lvl6": "ES-V",
+     "state": "Valencian Community",
+     "ISO3166-2-lvl4": "ES-VC",
+     "country": "Spain",
+     "country_code": "es"
+    },
+    "namedetails": {
+     "name": "València / Valencia",
+     "name:en": "Valencia",
+     "name:it": "Valencia",
+     "alt_name:el": "Βαλένσια",
+     "official_name": "Provincia de València/Valencia",
+     "official_name:be": "Правінцыя Валенсія",
+     "official_name:ca": "Província de València",
+     "official_name:de": "Provinz Valencia",
+     "official_name:es": "Provincia de Valencia",
+     "official_name:fr": "Province de Valence"
+    },
+    "boundingbox": [
+     "38.6865536",
+     "40.2116832",
+     "-1.5289448",
+     "-0.0247220"
+    ]
+   },
+   {
+    "osm_type": "way",
+    "osm_id": 1429788219,
+    "lat": "10.1700260",
+    "lon": "-68.0003987",
+    "class": "place",
+    "type": "city",
+    "place_rank": 16,
+    "importance": 0.5454979542969418,
+    "addresstype": "city",
+    "name": "Valencia",
+    "display_name": "Valencia, Parroquia Santa Rosa, Municipio Valencia, Carabobo State, 2001, Venezuela",
+    "address": {
+     "city": "Valencia",
+     "municipality": "Parroquia Santa Rosa",
+     "county": "Municipio Valencia",
+     "state": "Carabobo State",
+     "ISO3166-2-lvl4": "VE-G",
+     "postcode": "2001",
+     "country": "Venezuela",
+     "country_code": "ve"
+    },
+    "namedetails": {
+     "name": "Valencia",
+     "name:en": "Valencia",
+     "name:it": "Valencia",
+     "alt_name:fr": "Valencia",
+     "alt_name:pl": "Valencia"
+    },
+    "boundingbox": [
+     "10.1103999",
+     "10.2777934",
+     "-68.0778871",
+     "-67.9108491"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 1832214,
+    "lat": "34.7325886",
+    "lon": "-106.8503919",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.4802863843985767,
+    "addresstype": "county",
+    "name": "Valencia County",
+    "display_name": "Valencia County, New Mexico, United States",
+    "address": {
+     "county": "Valencia County",
+     "state": "New Mexico",
+     "ISO3166-2-lvl4": "US-NM",
+     "country": "United States",
+     "country_code": "us"
+    },
+    "namedetails": {
+     "name": "Valencia County",
+     "name:en": "Valencia County",
+     "alt_name": "Valencia"
+    },
+    "boundingbox": [
+     "34.4369886",
+     "34.9614394",
+     "-107.2044580",
+     "-106.4115513"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 13437285,
+    "lat": "7.9065266",
+    "lon": "125.0940073",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.4557747258879297,
+    "addresstype": "city",
+    "name": "Valencia",
+    "display_name": "Valencia, Bukidnon, Northern Mindanao, 8709, Philippines",
+    "address": {
+     "city": "Valencia",
+     "state": "Bukidnon",
+     "ISO3166-2-lvl4": "PH-BUK",
+     "region": "Northern Mindanao",
+     "ISO3166-2-lvl3": "PH-10",
+     "postcode": "8709",
+     "country": "Philippines",
+     "country_code": "ph"
+    },
+    "namedetails": {
+     "name": "Valencia",
+     "name:en": "Valencia",
+     "alt_name": "Valencia City",
+     "alt_name:en": "Valencia City",
+     "official_name": "City of Valencia",
+     "official_name:en": "City of Valencia",
+     "official_name:bik": "Siyudad kan Valencia",
+     "official_name:ceb": "Dakbayan sa Valencia",
+     "official_name:fil": "Lungsod ng Valencia",
+     "official_name:hil": "Dakbanwa sang Valencia",
+     "official_name:ilo": "Siudad ti Valencia",
+     "official_name:pam": "Ciudad ning Valencia;Lakanbalen ning Valencia",
+     "official_name:war": "Syudad han Valencia"
+    },
+    "boundingbox": [
+     "7.7916263",
+     "8.0358586",
+     "124.8026895",
+     "125.2733154"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 109259,
+    "lat": "-0.7696521",
+    "lon": "-79.3211355",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.4294998771350777,
+    "addresstype": "county",
+    "name": "Valencia",
+    "display_name": "Valencia, Los Ríos, Ecuador",
+    "address": {
+     "county": "Valencia",
+     "state": "Los Ríos",
+     "ISO3166-2-lvl4": "EC-R",
+     "country": "Ecuador",
+     "country_code": "ec"
+    },
+    "namedetails": {
+     "name": "Valencia"
+    },
+    "boundingbox": [
+     "-0.9965598",
+     "-0.5412458",
+     "-79.4848297",
+     "-79.0815569"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 13488356,
+    "lat": "9.2817803",
+    "lon": "123.2446771",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.3733250944850813,
+    "addresstype": "town",
+    "name": "Valencia",
+    "display_name": "Valencia, Negros Oriental, Negros Island Region, 6215, Philippines",
+    "address": {
+     "town": "Valencia",
+     "state": "Negros Oriental",
+     "ISO3166-2-lvl4": "PH-NER",
+     "region": "Negros Island Region",
+     "postcode": "6215",
+     "country": "Philippines",
+     "country_code": "ph"
+    },
+    "namedetails": {
+     "ref": "074623000",
+     "name": "Valencia",
+     "old_name": "Luzurriaga",
+     "official_name": "Municipality of Valencia"
+    },
+    "boundingbox": [
+     "9.2462671",
+     "9.3328698",
+     "123.0440882",
+     "123.2660010"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 1324932,
+    "lat": "8.1995857",
+    "lon": "-76.2030910",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.36001248335965585,
+    "addresstype": "county",
+    "name": "Valencia",
+    "display_name": "Valencia, Alto Sinú, Córdoba, RAP Caribe, Colombia",
+    "address": {
+     "county": "Valencia",
+     "state_district": "Alto Sinú",
+     "state": "Córdoba",
+     "ISO3166-2-lvl4": "CO-COR",
+     "region": "RAP Caribe",
+     "country": "Colombia",
+     "country_code": "co"
+    },
+    "namedetails": {
+     "name": "Valencia"
+    },
+    "boundingbox": [
+     "7.9969931",
+     "8.4017130",
+     "-76.4270444",
+     "-76.0454133"
+    ]
+   }
+  ],
+  "provincia di Arezzo": [
+   {
+    "osm_type": "relation",
+    "osm_id": 42366,
+    "lat": "43.5171442",
+    "lon": "11.7639282",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.7179667308911853,
+    "addresstype": "county",
+    "name": "Arezzo",
+    "display_name": "Arezzo, Tuscany, Italy",
+    "address": {
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Arezzo",
+     "short_name": "AR",
+     "official_name": "Provincia di Arezzo"
+    },
+    "boundingbox": [
+     "43.1563413",
+     "43.8778958",
+     "11.3973824",
+     "12.3722747"
+    ]
+   }
+  ],
+  "Po": [
+   {
+    "osm_type": "relation",
+    "osm_id": 42619,
+    "lat": "43.9357181",
+    "lon": "11.0941473",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 12,
+    "importance": 0.7153071806046727,
+    "addresstype": "county",
+    "name": "Prato",
+    "display_name": "Prato, Tuscany, Italy",
+    "address": {
+     "county": "Prato",
+     "ISO3166-2-lvl6": "IT-PO",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Prato",
+     "short_name": "PO",
+     "official_name": "Provincia di Prato"
+    },
+    "boundingbox": [
+     "43.7586956",
+     "44.1123682",
+     "10.9639122",
+     "11.2097886"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 162431,
+    "lat": "43.2957547",
+    "lon": "-0.3685668",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 16,
+    "importance": 0.6577548562329019,
+    "addresstype": "city",
+    "name": "Pau",
+    "display_name": "Pau, Pyrénées-Atlantiques, Nouvelle-Aquitaine, Metropolitan France, 64000, France",
+    "address": {
+     "city": "Pau",
+     "municipality": "Pau",
+     "county": "Pyrénées-Atlantiques",
+     "ISO3166-2-lvl6": "FR-64",
+     "state": "Nouvelle-Aquitaine",
+     "ISO3166-2-lvl4": "FR-NAQ",
+     "region": "Metropolitan France",
+     "postcode": "64000",
+     "country": "France",
+     "country_code": "fr"
+    },
+    "namedetails": {
+     "name": "Pau",
+     "old_name:it": "Palo"
+    },
+    "boundingbox": [
+     "43.2857792",
+     "43.3580393",
+     "-0.3925513",
+     "-0.2943049"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 2753623,
+    "lat": "43.3152419",
+    "lon": "-0.3920624",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 14,
+    "importance": 0.56250747717336,
+    "addresstype": "municipality",
+    "name": "Pau",
+    "display_name": "Pau, Pyrénées-Atlantiques, Nouvelle-Aquitaine, Metropolitan France, France",
+    "address": {
+     "municipality": "Pau",
+     "county": "Pyrénées-Atlantiques",
+     "ISO3166-2-lvl6": "FR-64",
+     "state": "Nouvelle-Aquitaine",
+     "ISO3166-2-lvl4": "FR-NAQ",
+     "region": "Metropolitan France",
+     "country": "France",
+     "country_code": "fr"
+    },
+    "namedetails": {
+     "name": "Pau"
+    },
+    "boundingbox": [
+     "43.0337485",
+     "43.5967976",
+     "-0.9485947",
+     "0.0302752"
+    ]
+   },
+   {
+    "osm_type": "relation",
+    "osm_id": 272661,
+    "lat": "9.0188628",
+    "lon": "-69.2736055",
+    "class": "boundary",
+    "type": "administrative",
+    "place_rank": 8,
+    "importance": 0.5005129877673589,
+    "addresstype": "state",
+    "name": "Portuguesa State",
+    "display_name": "Portuguesa State, Venezuela",
+    "address": {
+     "state": "Portuguesa State",
+     "ISO3166-2-lvl4": "VE-P",
+     "country": "Venezuela",
+     "country_code": "ve"
+    },
+    "namedetails": {
+     "ref": "PO",
+     "name": "Portuguesa",
+     "name:en": "Portuguesa State"
+    },
+    "boundingbox": [
+     "8.0915086",
+     "9.8434932",
+     "-70.1873374",
+     "-68.5038784"
+    ]
+   }
+  ],
+  "Casentino, Arezzo, Tuscany, Italy": [
+   {
+    "osm_type": "relation",
+    "osm_id": 19483128,
+    "lat": "43.6936379",
+    "lon": "11.7956868",
+    "class": "place",
+    "type": "region",
+    "place_rank": 18,
+    "importance": 0.39589062692589233,
+    "addresstype": "region",
+    "name": "Casentino",
+    "display_name": "Casentino, Arezzo, Tuscany, Italy",
+    "address": {
+     "region": "Casentino",
+     "county": "Arezzo",
+     "ISO3166-2-lvl6": "IT-AR",
+     "state": "Tuscany",
+     "ISO3166-2-lvl4": "IT-52",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Casentino"
+    },
+    "boundingbox": [
+     "43.5094014",
+     "43.8778958",
+     "11.5721141",
+     "11.9865851"
+    ]
+   }
+  ],
+  "Casentino, Sant'Eusanio Forconese, L'Aquila, Abruzzo, 67040, Italy": [
+   {
+    "osm_type": "node",
+    "osm_id": 777998083,
+    "lat": "42.2790611",
+    "lon": "13.5098204",
+    "class": "place",
+    "type": "village",
+    "place_rank": 19,
+    "importance": 0.40473259167301984,
+    "addresstype": "village",
+    "name": "Casentino",
+    "display_name": "Casentino, Sant'Eusanio Forconese, L'Aquila, Abruzzo, 67040, Italy",
+    "address": {
+     "village": "Casentino",
+     "city": "Sant'Eusanio Forconese",
+     "county": "L'Aquila",
+     "ISO3166-2-lvl6": "IT-AQ",
+     "state": "Abruzzo",
+     "ISO3166-2-lvl4": "IT-65",
+     "postcode": "67040",
+     "country": "Italy",
+     "country_code": "it"
+    },
+    "namedetails": {
+     "name": "Casentino"
+    },
+    "boundingbox": [
+     "42.2590611",
+     "42.2990611",
+     "13.4898204",
+     "13.5298204"
+    ]
+   }
+  ],
+  "Firenez": []
+ }
+}

@@ -179,6 +179,40 @@ cases:
           LEFT JOIN agent.alert_areas f ON f.analysis_id = a.analysis_id
           WHERE a.location_name ILIKE '%testville north%' GROUP BY a.analysis_id LIMIT 50
 
+  # Coverage: "why is only part of the area covered" must be answerable from rows
+  # (coverage_pct, uncovered_masked_pct / uncovered_no_data_pct, scene counts).
+  - id: en-sql-low-coverage-list
+    lang: en
+    tags: [coverage]
+    question: "Which completed analyses cover only part of the requested area, and what share do they cover?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT analysis_id, coverage_pct FROM agent.analyses
+        WHERE status = 'completed' AND low_coverage LIMIT 50
+    scripted:
+      - sql: >-
+          SELECT analysis_id, coverage_pct AS covered_percent FROM agent.analyses
+          WHERE coverage_pct < 80 ORDER BY coverage_pct LIMIT 50
+
+  - id: it-sql-perche-copertura-parziale
+    lang: it
+    tags: [coverage]
+    question: >-
+      Perché l'ultima analisi NDVI copre solo una parte dell'area? Che percentuale è coperta,
+      quanta è stata mascherata dalle nuvole e quanta era fuori dalle immagini?
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT coverage_pct, uncovered_masked_pct, uncovered_no_data_pct FROM agent.analyses
+        WHERE algorithm = 'ndvi' ORDER BY created_at DESC LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT coverage_pct AS coperta, uncovered_masked_pct AS nuvole,
+                 uncovered_no_data_pct AS fuori_immagini
+          FROM agent.analyses WHERE algorithm = 'ndvi' AND status = 'completed'
+          ORDER BY created_at DESC LIMIT 1
+
   # ---------------------------------------------------------------- adversarial
   - id: en-block-delete
     lang: en

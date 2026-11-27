@@ -18,7 +18,9 @@ from uuid import UUID
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
+import dask
 import numpy as np
+import pandas as pd
 import rioxarray
 
 # Configure logging FIRST, before any getLogger calls
@@ -31,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 from eo_brain.core.datacube import (
     DataCube, BBox, TimeRange, SearchParams, LoadConfig, LoadResult, PROVIDERS
+)
+from eo_brain.core.scenes import select_scenes, selection_for
+from eo_brain.core.radiometry import no_usable_scene_message, refused_note, split_by_radiometry
+from eo_brain.core.coverage import (
+    completion_message, coverage_layer, inside_bbox_mask, no_data_message,
+    summarize_coverage, usable_pixels_per_slice,
 )
 from eo_brain.algorithms.base import get_algorithm, ALGORITHMS
 from eo_brain.db.database import job_repo, get_connection, close_pool
@@ -317,15 +325,40 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
 
         job_repo.update_progress(job_id, 10, "Searching satellite catalog...")
 
+        # No scene-level cloud filter: the pixel mask is the filter, the
+        # scene's cloud cover only ranks (core.scenes).
         params = SearchParams(
             bbox=bbox,
             time_range=TimeRange(start=request.start_date, end=request.end_date)
-        ).with_query(**{"eo:cloud_cover": {"lt": 30}})
-
-        job_repo.update_progress(job_id, 15, "Connecting to data provider...")
-
+        )
         try:
-            load_result: LoadResult = cube.load(params, bands=bands, config=config)
+            items = cube.search(params)
+        except Exception as e:
+            raise ProviderError(f"STAC provider error: {e}") from e
+        if not items:
+            raise DataNotFoundError(
+                "No satellite data found. Try a wider date range or different area."
+            )
+        # Scenes whose DN-to-reflectance rule is unknown are left out and
+        # listed in the result, never converted with a guessed rule (core.radiometry).
+        items, refused = split_by_radiometry(cube.provider, items)
+        if refused:
+            logger.warning(f"Job {job_id}: {len(refused)} scenes left out, radiometry undetermined: "
+                           f"{[r['id'] for r in refused]}")
+        if not items:
+            raise DataNotFoundError(no_usable_scene_message(refused))
+
+        job_repo.update_progress(job_id, 15, f"Choosing scenes ({len(items)} found)...")
+        selection = select_scenes(
+            cube.provider, items, bbox, config.resolve_crs(bbox), request.resolution_m,
+            selection_for(request.algorithm, request.params),
+        )
+        if not selection.items:
+            raise DataNotFoundError(no_data_message(selection.to_dict()))
+
+        job_repo.update_progress(job_id, 20, f"Loading {len(selection.items)} scenes...")
+        try:
+            load_result: LoadResult = cube.load_items(selection.items, bbox, bands=bands, config=config)
         except Exception as e:
             raise ProviderError(f"STAC provider error: {e}") from e
 
@@ -351,7 +384,30 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
 
         job_repo.update_progress(job_id, 55, "Materializing results...")
 
+        inside = inside_bbox_mask(
+            load_result.data.x.values, load_result.data.y.values, load_result.crs, request.bbox
+        )
+        per_slice, has_data = usable_pixels_per_slice(
+            load_result.data, cube.provider, inside, masked=request.apply_cloud_mask
+        )
+        # The result on its own, then the coverage counts: computed in one
+        # dask.compute call, LISA's graph fails ("Missing dependency
+        # ('truediv-...')", dask 2026.11). The counts read only the mask band again.
         result.data = result.data.compute()
+        per_slice, has_data = dask.compute(per_slice, has_data)
+
+        layer = result.data[coverage_layer(request.algorithm, list(result.data.data_vars))]
+        slice_dates = (
+            [d.date() for d in pd.to_datetime(load_result.data.time.values)]
+            if "time" in load_result.data.dims else []
+        )
+        coverage = summarize_coverage(
+            np.isfinite(layer.values), inside, np.asarray(has_data.values, dtype=bool), slice_dates,
+            [int(v) for v in np.atleast_1d(per_slice.values)], selection.to_dict(),
+        )
+        if coverage["covered_px"] == 0:
+            raise DataNotFoundError(no_data_message(selection.to_dict()))
+        logger.info(f"Job {job_id}: coverage {coverage['coverage_pct']}% of the requested area")
 
         job_repo.update_progress(job_id, 65, "Generating map tiles...")
 
@@ -425,9 +481,11 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
                 "summary": summary, "bbox": request.bbox,
                 "metadata": result.metadata, "crs": load_result.crs,
                 "tile_url": tile_url, "vector_url": vector_url,
-                "vector_stats": vector_stats
+                "vector_stats": vector_stats, "coverage": coverage,
+                "radiometry": load_result.radiometry_summary(refused),
             },
-            cog_path=cog_path, output_crs=load_result.crs
+            cog_path=cog_path, output_crs=load_result.crs,
+            message=" ".join(filter(None, [completion_message(coverage), refused_note(refused)])),
         )
         logger.info(f"Job {job_id} completed successfully")
 

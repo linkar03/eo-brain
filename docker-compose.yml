@@ -40,6 +40,9 @@ services:
       - API_BASE_URL=http://localhost:8001
       - MAX_AREA_KM2=50000
       - ANALYSIS_TIMEOUT_SEC=600
+      # The package is bind-mounted from the host and the container runs as
+      # root: without this, root-owned __pycache__ folders land in the checkout.
+      - PYTHONDONTWRITEBYTECODE=1
       # Agent - read from host .env file (see .env.example)
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       # Empty = built-in defaults in eo_brain/agent/providers/gemini.py

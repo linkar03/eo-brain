@@ -148,17 +148,20 @@ class JobRepository:
         job_id: UUID,
         result: dict,
         cog_path: str,
-        output_crs: str
+        output_crs: str,
+        message: Optional[str] = None,
     ):
+        """Mark the job completed; ``message`` replaces the last progress message."""
         sql = """
             UPDATE jobs
             SET status = 'completed', progress = 100, result = %s,
-                cog_path = %s, output_crs = %s, completed_at = NOW()
+                cog_path = %s, output_crs = %s, completed_at = NOW(),
+                message = COALESCE(%s, message)
             WHERE id = %s
         """
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (Json(result), cog_path, output_crs, str(job_id)))
+                cur.execute(sql, (Json(result), cog_path, output_crs, message, str(job_id)))
 
     def fail(self, job_id: UUID, message: str):
         sql = """

@@ -10,12 +10,17 @@ Scoring rules (kept deliberately simple and documented in the README):
   ``rerun_with_different_algorithm`` with an empty argument).
 * ``days_back`` falls back to the tool default (30) when the model omits it.
 * ``location`` is compared on normalised text (casefold, no accents, no
-  punctuation) by whole-word phrase containment.
+  punctuation) by whole-word phrase containment. ``place`` (launch_analysis
+  only) is the place the job was created for, as the geocoder names it
+  (None when no job): it checks where the analysis went, not what the model
+  wrote.
 * A refusal case passes when the final turn created no job, whether the
   model declined in text, a deterministic validator rejected the call, or
   the needs-user guard refused a retry after such a rejection
   (``guard_blocked`` counts those refused calls; ``calls`` lists every call
-  of the scored turn with its arguments and outcome).
+  of the scored turn with its arguments and outcome). With
+  ``expect.place_choice: true`` it must also have asked the user to choose
+  a place: some call returned a needs-user result listing candidates.
 * A case whose model call failed (no model in the chain produced an answer,
   in the scored turn or in a setup turn) is outcome "error": it is neither a
   pass nor a fail, and it is left out of every rate below. Cases skipped
@@ -101,6 +106,7 @@ def effective_args(call) -> Dict[str, Any]:
     if call.name == "launch_analysis":
         eff["days_back"] = _days(args.get("days_back"))
         eff["location"] = args.get("location")
+        eff["place"] = result.get("location") if job else None
     if call.name == "rerun_with_different_algorithm":
         eff["location"] = result.get("location") if job else None
     if call.name == "get_job_status":
@@ -133,15 +139,28 @@ def call_log(calls) -> List[Dict[str, Any]]:
             "tool": c.name, "args": dict(c.args), "job_id": res.get("job_id"),
             "error": res.get("error"), "needs_user": bool(res.get("needs_user")),
             "blocked": bool(res.get("blocked")),
+            **({"candidates": [str(x.get("location")) for x in res["candidates"]]}
+               if res.get("candidates") else {}),
         })
     return log
+
+
+def expected_tools(expect: Dict[str, Any]) -> List[str]:
+    """``expect.tool`` (one name) or ``expect.tool_any_of`` (a question two tools can answer)."""
+    if expect.get("tool_any_of"):
+        return list(expect["tool_any_of"])
+    return [expect["tool"]] if expect.get("tool") else []
+
+
+def _expected_label(expect: Dict[str, Any]) -> Optional[str]:
+    return " | ".join(expected_tools(expect)) or None
 
 
 def _empty_result(case: Dict[str, Any], *, outcome: str, **extra) -> CaseResult:
     expect = case["expect"]
     fields: Dict[str, Any] = dict(
         id=case["id"], lang=case.get("lang", "?"), kind=expect["type"],
-        expected_tool=expect.get("tool"), called_tools=[], effective_args={}, arg_checks={},
+        expected_tool=_expected_label(expect), called_tools=[], effective_args={}, arg_checks={},
         job_created=False, tool_ok=None, args_ok=None, refused_ok=None, passed=False,
         tags=list(case.get("tags", [])), outcome=outcome,
     )
@@ -195,21 +214,26 @@ def score_case(case: Dict[str, Any], agent_result, note: str = "") -> CaseResult
 
     if kind == "refusal":
         ok = not job_created
+        if expect.get("place_choice"):
+            ok = ok and any(c.get("candidates") and c["needs_user"] and not c["blocked"] for c in log)
         return CaseResult(
             expected_tool=None, effective_args={}, arg_checks={},
             tool_ok=None, args_ok=None, refused_ok=ok, passed=ok and not note, **base,
         )
 
-    expected_tool = expect["tool"]
+    tools = expected_tools(expect)
+    if not tools:
+        raise ValueError(f"Case {case['id']}: tool_call needs expect.tool or expect.tool_any_of")
+    expected_tool = _expected_label(expect)
     first = calls[0] if calls else None
-    tool_ok = first is not None and first.name == expected_tool
+    tool_ok = first is not None and first.name in tools
     eff = effective_args(first) if first else {}
     checks = {
         name: tool_ok and check_constraint(eff.get(name), constraint)
         for name, constraint in (expect.get("args") or {}).items()
     }
     args_ok = tool_ok and all(checks.values())
-    needs_job = expect.get("job_created", expected_tool in JOB_TOOLS)
+    needs_job = expect.get("job_created", any(t in JOB_TOOLS for t in tools))
     job_ok = job_created if needs_job else True
     return CaseResult(
         expected_tool=expected_tool, effective_args=eff, arg_checks=checks,

@@ -1,7 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Bot, User, Loader2, MapPin, X, Maximize2, Minimize2, Database } from 'lucide-react';
+import { Send, Bot, User, Loader2, MapPin, X, Maximize2, Minimize2, Database, Mic, Square, AlertTriangle } from 'lucide-react';
 import type { BBox } from '../types';
 import { API_BASE } from '../api/config';
+import { SPEECH_LANGS, defaultSpeechLang, speechLangName, speechNoticeMessage, useSpeechInput } from '../hooks/useSpeechInput';
+import type { SpeechLang } from '../hooks/useSpeechInput';
+import { SILENCE_STOP_MS } from '../hooks/micGesture';
+import type { GestureMode } from '../hooks/micGesture';
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 150;
 
@@ -22,6 +26,8 @@ interface Message {
   jobStatus?: 'pending' | 'processing' | 'completed' | 'failed';
   jobProgress?: number;
   jobMessage?: string;
+  /** The completed job covers less of the area than the backend's low-coverage threshold. */
+  jobLowCoverage?: boolean;
   query?: QueryPayload;
 }
 
@@ -41,6 +47,51 @@ export function AgentChat({ onJobCompleted, onFlyTo }: AgentChatProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [speechLang, setSpeechLang] = useState<SpeechLang>(() => defaultSpeechLang(navigator.language));
+
+  // Voice input only fills the text box; sending stays a separate, explicit step.
+  const speech = useSpeechInput({ lang: speechLang, onText: setInput });
+  const cancelSpeech = speech.cancel;
+
+  // Hold-to-talk and tap-to-toggle on one button (rules: hooks/micGesture.ts).
+  // Pointer and key events drive the gesture; the click that follows them is
+  // ignored. A click with no pointer or key gesture before it (assistive
+  // technology, voice control) is a tap.
+  const lastGestureAt = useRef(0);
+  const markGesture = () => { lastGestureAt.current = Date.now(); };
+  const isActivationKey = (key: string) => key === ' ' || key === 'Enter';
+  const micHandlers = {
+    onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();             // keep the text box focused; no touch callout
+      markGesture();
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* not supported */ }
+      speech.press(input);
+    },
+    // With pointer capture the release arrives here even if the pointer has
+    // left the button; leaving the button is not a release.
+    onPointerUp: () => { markGesture(); speech.release(); },
+    onLostPointerCapture: () => speech.release(),
+    onPointerCancel: () => speech.endPress(),
+    onKeyDown: (e: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (!isActivationKey(e.key)) return;
+      e.preventDefault();
+      markGesture();
+      if (!e.repeat) speech.press(input);
+    },
+    onKeyUp: (e: React.KeyboardEvent<HTMLButtonElement>) => {
+      if (!isActivationKey(e.key)) return;
+      e.preventDefault();
+      markGesture();
+      speech.release();
+    },
+    onBlur: () => speech.endPress(),
+    onClick: () => {
+      if (Date.now() - lastGestureAt.current < 1000) return;
+      speech.click(input);
+    },
+    onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
+  };
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const pollTimers = useRef<Map<string, number>>(new Map());
@@ -53,12 +104,17 @@ export function AgentChat({ onJobCompleted, onFlyTo }: AgentChatProps) {
     return () => { pollTimers.current.forEach(clearTimeout); };
   }, []);
 
+  // Closing the chat releases the microphone.
+  useEffect(() => {
+    if (!isOpen) cancelSpeech();
+  }, [isOpen, cancelSpeech]);
+
   const updateMessageJob = useCallback(
-    (msgId: string, jobStatus: string, progress: number, jobMessage?: string) => {
+    (msgId: string, jobStatus: string, progress: number, jobMessage?: string, jobLowCoverage?: boolean) => {
       setMessages(prev =>
         prev.map(m =>
           m.id === msgId
-            ? { ...m, jobStatus: jobStatus as Message['jobStatus'], jobProgress: progress, jobMessage }
+            ? { ...m, jobStatus: jobStatus as Message['jobStatus'], jobProgress: progress, jobMessage, jobLowCoverage }
             : m
         )
       );
@@ -79,7 +135,10 @@ export function AgentChat({ onJobCompleted, onFlyTo }: AgentChatProps) {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
           const data = await res.json();
-          updateMessageJob(msgId, data.status, data.progress ?? 0, data.message);
+          updateMessageJob(
+            msgId, data.status, data.progress ?? 0, data.message ?? undefined,
+            data.result?.coverage?.low_coverage === true,
+          );
 
           if (data.status === 'completed') {
             pollTimers.current.delete(msgId);
@@ -102,6 +161,7 @@ export function AgentChat({ onJobCompleted, onFlyTo }: AgentChatProps) {
   const handleSend = async () => {
     const trimmed = input.trim();
     if (!trimmed || isLoading) return;
+    cancelSpeech();
 
     const userMsg: Message = { id: crypto.randomUUID(), role: 'user', text: trimmed };
     setMessages(prev => [...prev, userMsg]);
@@ -181,10 +241,14 @@ export function AgentChat({ onJobCompleted, onFlyTo }: AgentChatProps) {
           {sessionId && <span className="text-xs text-slate-400 font-mono">session active</span>}
         </div>
         <div className="flex items-center gap-1">
-          <button onClick={() => setIsExpanded(!isExpanded)} className="p-1.5 hover:bg-gray-200 rounded-lg">
+          <button
+            onClick={() => setIsExpanded(!isExpanded)}
+            aria-label={isExpanded ? 'Shrink chat' : 'Expand chat'}
+            className="p-1.5 hover:bg-gray-200 rounded-lg"
+          >
             {isExpanded ? <Minimize2 className="w-4 h-4 text-gray-500" /> : <Maximize2 className="w-4 h-4 text-gray-500" />}
           </button>
-          <button onClick={() => setIsOpen(false)} className="p-1.5 hover:bg-gray-200 rounded-lg">
+          <button onClick={() => setIsOpen(false)} aria-label="Close chat" className="p-1.5 hover:bg-gray-200 rounded-lg">
             <X className="w-4 h-4 text-gray-500" />
           </button>
         </div>
@@ -211,7 +275,12 @@ export function AgentChat({ onJobCompleted, onFlyTo }: AgentChatProps) {
               <p className="whitespace-pre-wrap">{msg.text}</p>
               {msg.query && <QueryResult query={msg.query} />}
               {msg.jobId && msg.jobStatus && (
-                <JobStatusBadge status={msg.jobStatus} progress={msg.jobProgress ?? 0} message={msg.jobMessage} />
+                <JobStatusBadge
+                  status={msg.jobStatus}
+                  progress={msg.jobProgress ?? 0}
+                  message={msg.jobMessage}
+                  lowCoverage={msg.jobLowCoverage}
+                />
               )}
             </div>
             {msg.role === 'user' && <User className="w-5 h-5 text-slate-400 mt-1 flex-shrink-0" />}
@@ -234,23 +303,88 @@ export function AgentChat({ onJobCompleted, onFlyTo }: AgentChatProps) {
           <input
             type="text"
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={e => {
+              // Typing while listening stops the dictation, so the two never
+              // write into the box at the same time.
+              cancelSpeech();
+              setInput(e.target.value);
+            }}
             onKeyDown={handleKeyDown}
             placeholder="Analyze vegetation near Rome..."
+            aria-label="Message"
             disabled={isLoading}
-            className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:opacity-50"
+            className="flex-1 min-w-0 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:opacity-50"
           />
+          {speech.supported && (
+            <>
+              <select
+                value={speechLang}
+                onChange={e => setSpeechLang(e.target.value as SpeechLang)}
+                aria-label="Dictation language"
+                title="Dictation language"
+                className="px-1 py-2 text-xs font-medium text-slate-700 border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-slate-300"
+              >
+                {SPEECH_LANGS.map(l => (
+                  <option key={l.tag} value={l.tag}>{l.short}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                {...micHandlers}
+                disabled={isLoading}
+                aria-pressed={speech.listening}
+                aria-label={`Dictate in ${speechLangName(speechLang)}`}
+                aria-describedby="dictation-help"
+                title={`Dictate in ${speechLangName(speechLang)}: hold to talk, or tap to start and tap again to stop`}
+                className={`px-3 py-2 rounded-lg border transition-colors touch-none select-none disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-slate-300 ${
+                  speech.listening
+                    ? 'bg-red-600 border-red-600 text-white ring-2 ring-red-300 motion-safe:animate-pulse'
+                    : 'bg-white border-gray-200 text-slate-700 hover:bg-gray-100'
+                }`}
+              >
+                {speech.listening
+                  ? <Square className="w-4 h-4" fill="currentColor" aria-hidden="true" />
+                  : <Mic className="w-4 h-4" aria-hidden="true" />}
+              </button>
+            </>
+          )}
           <button
             onClick={handleSend}
             disabled={!input.trim() || isLoading}
+            aria-label="Send"
             className="px-3 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             <Send className="w-4 h-4" />
           </button>
         </div>
+        {speech.supported && (
+          <>
+            <p role="status" className={`mt-1.5 empty:mt-0 text-xs ${speech.error ? 'text-red-700' : 'text-slate-600'}`}>
+              {speech.listening
+                ? dictationStatus(speech.mode, speech.handsFree, speechLang)
+                : speech.message ?? speechNoticeMessage(speech.notice)}
+            </p>
+            <p id="dictation-help" hidden>
+              Hold the microphone, or hold Space or Enter on it, to talk; release to stop.
+              A short press starts hands-free dictation; press again to stop.
+            </p>
+          </>
+        )}
       </div>
     </div>
   );
+}
+
+/** The status line while listening: which gesture is active and how to stop it. */
+export function dictationStatus(mode: GestureMode, handsFree: boolean, lang: SpeechLang): string {
+  const language = speechLangName(lang);
+  const unsent = 'Nothing is sent until you press Send.';
+  if (handsFree) {
+    return `Hands-free (${language}): listening until you press the microphone again; it stops by itself `
+      + `after ${SILENCE_STOP_MS / 1000} seconds of silence. ${unsent}`;
+  }
+  if (mode === 'hold') return `Push-to-talk (${language}): listening while you hold. Release to stop. ${unsent}`;
+  return `Listening (${language}). Hold to talk, or release now for hands-free. ${unsent}`;
 }
 
 function formatCell(value: unknown): string {
@@ -301,21 +435,35 @@ function QueryResult({ query }: { query: QueryPayload }) {
   );
 }
 
-function JobStatusBadge({ status, progress, message }: { status: string; progress: number; message?: string }) {
+/**
+ * Job progress while it runs; afterwards the backend's final message, which for a
+ * completed job states how much of the requested area has cloud-free data and, when
+ * that is low, why and what to try.
+ */
+export function JobStatusBadge({ status, progress, message, lowCoverage = false }: {
+  status: string;
+  progress: number;
+  message?: string;
+  lowCoverage?: boolean;
+}) {
   const cfg: Record<string, { bg: string; bar: string; text: string; label: string }> = {
     pending:    { bg: 'bg-yellow-50',  bar: 'bg-yellow-400', text: 'text-yellow-700', label: 'Queued...' },
     processing: { bg: 'bg-blue-50',    bar: 'bg-blue-500',   text: 'text-blue-700',   label: `${progress}%` },
     completed:  { bg: 'bg-green-50',   bar: 'bg-green-500',  text: 'text-green-700',  label: 'Map updated' },
+    partial:    { bg: 'bg-amber-50',   bar: 'bg-amber-500',  text: 'text-amber-800',  label: 'Map updated: partial coverage' },
     failed:     { bg: 'bg-red-50',     bar: 'bg-red-500',    text: 'text-red-700',    label: 'Failed' },
   };
-  const c = cfg[status] ?? cfg.pending;
+  const key = status === 'completed' && lowCoverage ? 'partial' : status;
+  const c = cfg[key] ?? cfg.pending;
   const isActive = status === 'pending' || status === 'processing';
+  const isDone = status === 'completed' || status === 'failed';
 
   return (
-    <div className={`mt-2 rounded-lg p-2 ${c.bg}`}>
+    <div className={`mt-2 rounded-lg p-2 ${c.bg}`} data-job-status={key}>
       <div className="flex items-center justify-between mb-1">
         <div className={`flex items-center gap-1.5 text-xs font-medium ${c.text}`}>
           {isActive && <Loader2 className="w-3 h-3 animate-spin" />}
+          {key === 'partial' && <AlertTriangle className="w-3 h-3" aria-hidden="true" />}
           {c.label}
         </div>
         {message && isActive && (
@@ -330,13 +478,10 @@ function JobStatusBadge({ status, progress, message }: { status: string; progres
           />
         </div>
       )}
-      {status === 'completed' && (
-        <div className={`text-xs ${c.text} flex items-center gap-1`}>
-          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-          Analysis complete - results on map
-        </div>
+      {isDone && (
+        <p className={`text-xs ${c.text}`}>
+          {message || (status === 'completed' ? 'Analysis complete - results on map' : 'The analysis failed.')}
+        </p>
       )}
     </div>
   );

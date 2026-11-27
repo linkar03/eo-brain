@@ -1,9 +1,11 @@
 ﻿"""
 eo_brain/algorithms/base.py - EO Brain Analysis Algorithms
 
-All index computations auto-normalize input bands to [0,1] reflectance,
-handling Sentinel-2 scaled integers transparently. Operations remain
-lazy (Dask-compatible) until the caller triggers .compute().
+Every index is computed from surface reflectance. The bands arrive as the
+provider's digital numbers with each acquisition's rule attached by the loader
+(``core.radiometry``); ``Algorithm._to_reflectance`` applies it to every
+acquisition before any compositing. Operations remain lazy (Dask-compatible)
+until the caller triggers .compute().
 """
 
 from abc import ABC, abstractmethod
@@ -16,6 +18,8 @@ import xarray as xr
 import numpy as np
 import dask.array as da
 from scipy import ndimage
+
+from eo_brain.core.radiometry import REFLECTANCE_UNITS, band_to_reflectance
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +87,19 @@ class Algorithm(ABC):
     @staticmethod
     def _to_reflectance(band: xr.DataArray) -> xr.DataArray:
         """
-        Normalize to float32 reflectance [0, 1].
-        Sentinel-2 L2A from Element84 is stored as uint16 (DN * 10000).
-        Dtype check is free and keeps the Dask graph lazy.
+        Float32 surface reflectance of ``band``, per acquisition.
+
+        A band loaded by ``DataCube.load_items`` carries its rule per time
+        slice (scale, offset, nodata): nodata and NaN become NaN, then
+        DN * scale + offset, with non-positive values raised to one DN step
+        (``core.radiometry.to_reflectance``). Integer or float input makes no
+        difference. A band already in reflectance says so in
+        ``attrs["units"]``; any other band is refused (RadiometryUndetermined,
+        a ValueError) rather than scaled by a guess.
         """
-        if np.issubdtype(band.dtype, np.integer):
-            return (band.astype(np.float32) / 10000.0).clip(0, 1)
-        return band.astype(np.float32)
+        if band.attrs.get("units") == REFLECTANCE_UNITS:
+            return band.astype(np.float32)
+        return band_to_reflectance(band)
 
     @staticmethod
     def _ensure_2d(arr: xr.DataArray, method: str = "median") -> xr.DataArray:

@@ -39,6 +39,26 @@ class TestStubs:
         with pytest.raises(ValueError, match="Could not geocode"):
             StubGeocoder(GAZ)("xqzvbnm")
 
+    def test_gazetteer_first_then_recorded_responses(self):
+        recorded = {"Casentino, Arezzo, Italia": [{
+            "class": "place", "type": "region", "addresstype": "region", "importance": 0.4,
+            "name": "Casentino", "display_name": "Casentino, Arezzo, Tuscany, Italy",
+            "namedetails": {"name": "Casentino"}, "lat": "43.7", "lon": "11.8",
+            "boundingbox": ["43.5", "43.9", "11.5", "12.0"],
+        }], "Firenze": []}
+        geo = StubGeocoder(GAZ, recorded)
+        assert geo("Firenze").name == "Firenze, Toscana, Italia"            # gazetteer wins
+        assert geo("casentino,  arezzo, italia").kind == "region"           # case and spacing ignored
+        assert geo.searches == ["Firenze", "casentino, arezzo, italia"]
+
+    def test_shipped_recordings_resolve_the_live_failures(self):
+        data = runner.load_dataset(runner.DEFAULT_CASES)
+        geo = StubGeocoder(data["gazetteer"], runner.recorded_searches(data))
+        assert geo("vallata del Casentino").name == "Casentino, Arezzo, Tuscany, Italy"
+        assert geo("casentino arezzo, italia").name == "Casentino, Arezzo, Tuscany, Italy"
+        with pytest.raises(ValueError, match="matches more than one place"):
+            geo("Casentino")
+
 
 class TestConstraints:
     @pytest.mark.parametrize(
@@ -98,6 +118,21 @@ class TestScoring:
         assert r.tool_ok and not r.args_ok and not r.passed
         assert r.arg_checks == {"algorithm": True, "days_back": False, "location": True}
 
+    def test_place_is_where_the_job_went(self):
+        case = {**CASE, "expect": {**CASE["expect"], "args": {"place": {"matches": ["firenze"]}}}}
+        assert score_case(case, _result([_launch({"location": "x", "days_back": 90})], "j1")).passed
+        r = score_case(case, _result([_launch({"location": "Firenze", "days_back": 90}, job=False)]))
+        assert r.effective_args["place"] is None and not r.passed
+
+    def test_place_choice_refusal_needs_a_question(self):
+        case = {"id": "r", "expect": {"type": "refusal", "place_choice": True}}
+        asked = ToolInvocation("launch_analysis", {"location": "Casentino"},
+                               {"error": "which?", "needs_user": True, "candidates": [{"location": "A"}, {"location": "B"}]})
+        r = score_case(case, _result([asked]))
+        assert r.passed and r.calls[0]["candidates"] == ["A", "B"]
+        assert not score_case(case, _result([_launch({"location": "Casentino"}, job=False)])).passed
+        assert not score_case(case, _result([])).passed
+
     def test_missing_job_fails(self):
         r = score_case(CASE, _result([_launch({"location": "Firenze", "algorithm": "ndvi", "days_back": 90}, job=False)]))
         assert r.args_ok and not r.passed
@@ -139,11 +174,12 @@ class TestDataset:
 class TestGuardCases:
     """The `guard` cases replay a misbehaving model; they must depend on the guard."""
 
-    def _run(self, case, gazetteer):
+    def _run(self, case, data):
         from eo_brain.agent.providers.scripted import ScriptedProvider
 
         return runner.run_case(case, provider=ScriptedProvider([]), models=["m"],
-                               gazetteer=gazetteer, sleep=lambda _s: None)
+                               gazetteer=data["gazetteer"], sleep=lambda _s: None,
+                               recorded=runner.recorded_searches(data))
 
     def test_guard_cases_pass_with_the_guard_and_refusals_fail_without_it(self, monkeypatch):
         from eo_brain.agent import brain
@@ -154,17 +190,17 @@ class TestGuardCases:
         counter = [c for c in guard_cases if c["expect"]["type"] == "tool_call"]
         assert len(refusals) >= 3 and len(counter) >= 2
 
-        with_guard = {c["id"]: self._run(c, data["gazetteer"]) for c in guard_cases}
+        with_guard = {c["id"]: self._run(c, data) for c in guard_cases}
         assert {i: r.outcome for i, r in with_guard.items()} == {c["id"]: "pass" for c in guard_cases}
         assert all(with_guard[c["id"]].guard_blocked == 1 for c in refusals)
         assert all(with_guard[c["id"]].guard_blocked == 0 for c in counter)
 
         monkeypatch.setattr(brain, "JOB_TOOLS", frozenset())  # guard off
         for c in refusals:
-            r = self._run(c, data["gazetteer"])
+            r = self._run(c, data)
             assert r.outcome == "fail" and r.job_created, c["id"]
         for c in counter:  # the counter-cases never relied on the guard
-            assert self._run(c, data["gazetteer"]).outcome == "pass", c["id"]
+            assert self._run(c, data).outcome == "pass", c["id"]
 
     def test_multi_round_script(self):
         steps = runner.scripted_steps({"scripted": {"turns": [
@@ -201,6 +237,8 @@ class TestRunner:
         data = json.loads(report.read_text())
         assert data["measures_model_quality"] is False
         assert data["summary"]["passed"] == data["summary"]["cases"]
+        assert data["recorded_searches"]["path"] == "fixtures/nominatim_recorded.json"
+        assert len(data["recorded_searches"]["sha256"]) == 64
 
     def test_scripted_run_fails_when_a_case_fails(self, tmp_path, capsys):
         data = runner.load_dataset(runner.DEFAULT_CASES)
