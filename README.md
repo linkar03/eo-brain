@@ -1,15 +1,46 @@
-# EO Brain: a text-to-GIS prototype
+# EO Brain: text-to-GIS with tool-calling and text-to-SQL agents
 
-You type a request in Italian or English, for example *"allagamenti a Valencia negli ultimi 3 mesi"*
-or *"vegetation stress near Pisa"*. The app geocodes the place and runs a satellite analysis
-over public STAC catalogues (Sentinel-2, Landsat). It then draws the result on a map as a raster
-layer plus vectorised alert polygons.
+[![CI](https://github.com/linkar03/eo-brain/actions/workflows/ci.yml/badge.svg)](https://github.com/linkar03/eo-brain/actions/workflows/ci.yml)
 
-A second, **read-only** agent answers questions about analyses that already ran, for example
-*"how many hectares were at alert level in the latest flood analysis?"*. It writes SQL over
-curated PostGIS views, and the chat shows the SQL and the rows it returned.
+Ask for a satellite analysis in plain language, then ask questions about the result.
+Two LLM agents do the talking; **code, not the model, decides what runs.**
 
-This is a prototype. See [Limitations](#limitations).
+![The chat asks for spatial outliers in vegetation around Fiesole. The map shows the result, and a follow-up question is answered with the SQL and the rows behind it.](docs/images/eo-brain-chat-map.webp)
+
+*A real session, 2026-11-27: the request, the analysis it launched with its coverage, and a
+follow-up answered by the data agent with its SQL and rows.*
+
+- **A tool-calling orchestrator.** You type or dictate a request in Italian or English, for
+  example *"allagamenti a Valencia negli ultimi 3 mesi"* or *"vegetation stress near Pisa"*.
+  The agent geocodes the place and launches a Sentinel-2 analysis over a public STAC catalogue.
+  The result is drawn on the map as a raster layer plus vectorised alert polygons, and it states
+  how much of the area it covers.
+- **A separate, read-only data agent.** It answers questions about analyses that already ran,
+  for example *"how many hectares were at alert level in the latest flood analysis?"*. It
+  writes SQL over curated PostGIS views, and the chat shows the SQL and the rows it returned.
+- **A deterministic boundary around both.** Every tool call goes through validators before
+  anything runs. Every query goes through an allow-list gate on the parsed SQL, then runs as a
+  database role that can only read those views, in a read-only transaction with a timeout.
+  See [The deterministic boundary](#the-deterministic-boundary).
+- **Evals, offline and live.** The same cases replay in CI without a model and run live against
+  one. The harness tells a failed case from a case that never reached the model.
+
+## Results at a glance
+
+| Measured live on 2026-11-26 | `gemini-3.6-flash` | `gemini-3.5-flash-lite` |
+|---|---|---|
+| Tool-calling cases passed | 39/39 | 39/39 |
+| Requests that must be refused, refused | 12/12 | 12/12 |
+| Adversarial SQL requests blocked | 8/8 | 8/8 |
+| SQL answers with the right values | 9/10 | 8/10 |
+
+"Right values" is column-subset accuracy. The stricter comparison, the method and what the
+misses are: [Model-quality results](#model-quality-results). The suites have grown since that
+run, to 47 tool cases and 20 SQL cases. CI runs over 850 backend tests and over 110 frontend
+tests on every push.
+
+To run it: [Quickstart](#quickstart-docker-compose). What it does not do yet:
+[Limitations](#limitations).
 
 ## Contents
 
@@ -634,7 +665,8 @@ The voice input is tested with Vitest in a simulated DOM (happy-dom) with fake t
   - dictated text is edited and sent only on Enter;
   - typing, sending, closing the chat and unmounting all stop listening;
   - the message for a denied permission;
-  - the job badge: the completion message with its coverage, the amber partial-coverage state, the failure reason.
+  - the job badge: the completion message with its coverage, the amber partial-coverage state, the failure reason;
+- the agent's reply text (`src/components/agentText.test.tsx`): the little Markdown the model uses (bold, code, bullets) is rendered, asterisks and hyphens that are not markup are left alone, and a reply is never interpreted as HTML.
 
 ```bash
 cd frontend
@@ -842,6 +874,7 @@ backend/
   tests/                 offline, DB-backed and original tests
 frontend/                React + MapLibre dashboard and chat (src/api/config.ts: API URL; src/hooks/useSpeechInput.ts and micGesture.ts: voice input)
   Dockerfile             frontend image (Vite dev server)
+docs/images/             the screenshot at the top of this README
 .github/workflows/       CI: offline tests + scripted eval; PostGIS service for DB tests + SQL eval; original suite + tile server; frontend type check, tests, build
 Dockerfile               api image (Python 3.11)
 docker-compose.yml       db (PostGIS), api, frontend
