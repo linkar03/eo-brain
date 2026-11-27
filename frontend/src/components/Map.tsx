@@ -1,5 +1,8 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
-import maplibregl from 'maplibre-gl';
+import * as maplibregl from 'maplibre-gl';
+// MapLibre 6 ships as ES modules only and, behind a bundler, has to be told where
+// its worker is. Vite's `?worker&url` builds the worker and returns its URL.
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import { Square, Trash2, MousePointer } from 'lucide-react';
 import type { BBox, ResultLayer } from '../types';
@@ -19,15 +22,34 @@ const SEVERITY_COLORS: Record<number, string> = {
   3: '#dc2626',
 };
 
+maplibregl.setWorkerUrl(maplibreWorkerUrl);
+
 type DrawMode = 'simple_select' | 'draw_polygon';
+
+// The draw plugin fires its own events on the map. MapLibre 6 types `on` for
+// MapLibre's events only, although it still delivers any event name at run time.
+interface DrawEvents {
+  'draw.create': { features: GeoJSON.Feature[] };
+  'draw.update': { features: GeoJSON.Feature[] };
+  'draw.delete': { features: GeoJSON.Feature[] };
+  'draw.modechange': { mode: string };
+}
+
+function onDraw<K extends keyof DrawEvents>(
+  m: maplibregl.Map,
+  type: K,
+  listener: (e: DrawEvents[K]) => void
+): void {
+  (m as unknown as { on(type: string, listener: (e: DrawEvents[K]) => void): unknown }).on(type, listener);
+}
 
 // --- Basemaps -------------------------------------------------------------
 // Both providers require attribution that stays visible on the map: the OSM tile
 // policy says not to hide it "behind toggles", Esri wants the data sources
 // "always visible". MapLibre's attribution control (bottom-right) lists the
 // attribution of the visible sources; it is created with `compact: false`
-// because MapLibre 4's default (`compact: true`) collapses it to an (i) button
-// as soon as the map is dragged.
+// because MapLibre's responsive default collapses it to an (i) button when a
+// narrow map is dragged.
 
 // OpenStreetMap standard tiles (default). The tile usage policy asks for
 // "© OpenStreetMap contributors" with "OpenStreetMap" linking to the copyright page:
@@ -190,17 +212,17 @@ export function Map({
 
     m.on('load', () => setMapLoaded(true));
 
-    m.on('draw.create', (e) => {
+    onDraw(m, 'draw.create', (e) => {
       handleDrawComplete(e.features);
       setDrawMode('simple_select');
       setHasSelection(true);
     });
-    m.on('draw.update', (e) => handleDrawComplete(e.features));
-    m.on('draw.delete', () => {
+    onDraw(m, 'draw.update', (e) => handleDrawComplete(e.features));
+    onDraw(m, 'draw.delete', () => {
       onBBoxSelected([0, 0, 0, 0]);
       setHasSelection(false);
     });
-    m.on('draw.modechange', (e) => setDrawMode(e.mode as DrawMode));
+    onDraw(m, 'draw.modechange', (e) => setDrawMode(e.mode as DrawMode));
 
     map.current = m;
 
