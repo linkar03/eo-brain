@@ -254,7 +254,8 @@ TOOL_SPECS: List[ToolSpec] = [
             "Answer a question about analyses that ALREADY exist (past jobs, their status, "
             "alert areas, hectares by severity, overlaps, comparisons, how much area of an "
             "NDVI / NDWI / MNDWI result is above or below a value: how much green, how much "
-            "water) with a read-only database query. Pass the user's question, self-contained, "
+            "water; for flood and LISA, the hectares and share of each severity and the number "
+            "of mapped zones) with a read-only database query. Pass the user's question, self-contained, "
             "in the user's language, with any threshold the user gave. Never use it to start a "
             "new analysis."
         ),
@@ -282,7 +283,8 @@ CAPABILITIES:
 - LISA: Spatial anomaly detection (outlier clusters in vegetation)
 - Flood: Flood extent mapping with severity classification
 - Stored results: answer questions about analyses already run (status, alert areas, \
-  hectares per severity, overlaps, comparisons; for NDVI, NDWI and MNDWI, how much area lies \
+  hectares per severity, overlaps, comparisons; for flood and LISA, the hectares and share of \
+  each severity and how many zones were mapped; for NDVI, NDWI and MNDWI, how much area lies \
   above or below an index value, e.g. how much green or how much water) with query_database
 
 RULES:
@@ -333,6 +335,11 @@ RULES:
    stated with that threshold, from the threshold column of the rows; if the user named none, \
    say it is the app's default (NDVI 0.65 for dense green vegetation, 0 for water with NDWI or \
    MNDWI). A NULL area is not zero: say the stored rows give no figure for it.
+15. Flood and LISA results: state a number of zones (anomalies, flooded areas) with the minimum \
+   zone size and the number of smaller patches left out, from the rows (e.g. "3 zones of at least \
+   400 m2; 131 smaller patches not counted"). Flood water is water seen in the analysis period, \
+   permanent water (sea, lakes, rivers) included: call it water detected, never newly flooded \
+   land or a change. A NULL zone size, area or share is not available, never zero.
 """
 
 

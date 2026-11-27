@@ -45,8 +45,9 @@ GRANT USAGE ON SCHEMA agent TO agent_reader;
 
 -- Relations: nothing in "public" (including PostGIS metadata readable by
 -- PUBLIC by default), SELECT on the agent views only: analyses, alert_areas,
--- analysis_severity_summary and index_value_distribution. The tables behind
--- them (jobs, alert_features, index_value_bins) stay unreadable. The grant
+-- analysis_severity_summary, index_value_distribution and severity_areas. The
+-- tables behind them (jobs, alert_features, index_value_bins,
+-- severity_class_areas) stay unreadable. The grant
 -- covers the views that exist when this file runs: run it after agent_views.sql.
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM agent_reader;
 REVOKE SELECT ON public.spatial_ref_sys, public.geometry_columns, public.geography_columns FROM PUBLIC;

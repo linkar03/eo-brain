@@ -39,6 +39,12 @@ class MoranQuadrant(IntEnum):
     LH = 4  # outlier: low surrounded by high
 
 
+# The quadrants LISAAlgorithm gives a severity to: a LISA anomaly is always a
+# spatial outlier, so every pixel of severity 1 to 3 (and every LISA zone the
+# vectoriser maps) has one of these two quadrants.
+OUTLIER_QUADRANTS = (MoranQuadrant.HL, MoranQuadrant.LH)
+
+
 @dataclass(frozen=True)
 class LISAConfig:
     neighborhood_m: int = 150

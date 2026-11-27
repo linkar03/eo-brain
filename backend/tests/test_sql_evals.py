@@ -24,7 +24,7 @@ from evals.sql_suite import (
 )
 
 ADMIN_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
-VIEWS = ["analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution"]
+VIEWS = ["analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution", "severity_areas"]
 
 
 @pytest.fixture(scope="module")
@@ -73,6 +73,24 @@ def test_dataset_covers_the_value_distribution_questions(dataset):
         assert "agent.index_value_distribution" in gold, case["id"]
         # the threshold is part of the answer (data agent rule 9)
         assert " AS threshold" in gold, case["id"]
+
+
+def test_dataset_covers_the_flood_and_lisa_questions(dataset):
+    """Zone counts, class areas and shares, quadrants, vegetated share, flood water, no data."""
+    cases = [c for c in dataset["cases"] if {"zones", "severity-areas"} & set(c.get("tags", []))]
+    tags = {t for c in cases for t in c["tags"]}
+    assert {"zones", "severity-areas", "share", "quadrant", "vegetated", "water", "missing", "lisa",
+            "flood"} <= tags
+    assert {c["lang"] for c in cases} == {"it", "en"}
+    for case in cases:
+        gold = case["expect"]["gold_sql"]
+        if "severity-areas" in case["tags"]:
+            assert "agent.severity_areas" in gold, case["id"]
+        if "zones" in case["tags"]:
+            # a count of zones comes with the minimum zone size (data agent rule 10)
+            assert "min_zone_area_m2" in gold and "small_patches_left_out" in gold, case["id"]
+    # both figures in one answer: the zone count and the class area
+    assert any({"zones", "severity-areas"} <= set(c["tags"]) for c in cases)
 
 
 def test_adversarial_scripts_are_rejected_by_the_gate_except_marked_safe_answers(dataset):
@@ -338,9 +356,28 @@ def test_scripted_sql_suite_passes_and_a_wrong_answer_is_caught(dataset):
     cases = copy.deepcopy(dataset["cases"])
     wrong = copy.deepcopy(next(c for c in cases if c["id"] == "en-sql-alert-ha-latest-flood"))
     wrong["id"] = "wrong-answer-control"
-    # Plausible but wrong: oldest flood instead of latest (8 ha, not 12 ha).
+    # Plausible but wrong: oldest flood instead of latest (001, whose class areas were
+    # never recorded: NULL, not 12.64 ha).
     wrong["scripted"] = [{"sql": wrong["scripted"][0]["sql"].replace("DESC", "ASC")}]
     cases.append(wrong)
+    # Plausible but wrong: the alert area read from the mapped zones (6 ha), which leave
+    # out the patches under the minimum zone size, instead of the class area (6.52 ha).
+    zones = copy.deepcopy(next(c for c in cases if c["id"] == "en-sql-alert-zones-and-area"))
+    zones["id"] = "zone-area-as-class-area-control"
+    zones["scripted"] = [{"sql": (
+        "SELECT s.feature_count, a.min_zone_area_m2, a.small_patches_left_out, s.total_area_ha "
+        "FROM agent.analysis_severity_summary s JOIN agent.analyses a ON a.analysis_id = s.analysis_id "
+        "WHERE s.algorithm = 'lisa' AND s.severity = 3 ORDER BY s.analysis_created_at DESC LIMIT 1")}]
+    cases.append(zones)
+    # Plausible but wrong: 001 has no class areas, and a COALESCE through a LEFT JOIN from
+    # agent.analyses turns that unknown water area into 0 hectares.
+    no_areas = copy.deepcopy(next(c for c in cases if c["id"] == "it-sql-acqua-alluvione-non-disponibile"))
+    no_areas["id"] = "missing-areas-as-zero-control"
+    no_areas["scripted"] = [{"sql": (
+        "SELECT coalesce(sum(s.area_ha), 0) AS ettari_acqua FROM agent.analyses a "
+        "LEFT JOIN agent.severity_areas s ON s.analysis_id = a.analysis_id AND s.severity >= 1 "
+        "WHERE a.analysis_id = '00000000-0000-4000-a000-000000000001' LIMIT 1")}]
+    cases.append(no_areas)
     # Plausible but wrong: no distribution was recorded for Old Harbour, and the CASE form
     # through a LEFT JOIN from agent.analyses turns that unknown area into 0 hectares.
     zero = copy.deepcopy(next(c for c in cases if c["id"] == "en-sql-water-no-distribution"))
@@ -363,8 +400,15 @@ def test_scripted_sql_suite_passes_and_a_wrong_answer_is_caught(dataset):
 
     by_id = {r.id: r for r in results}
     control = by_id.pop("wrong-answer-control")
-    assert control.status == "ok" and control.rows == [[8.0]] and control.gold_rows == [[12.0]]
+    assert control.status == "ok" and control.rows == [[None]] and control.gold_rows == [[12.64]]
     assert not control.passed and control.outcome == "fail"
+    from_zones = by_id.pop("zone-area-as-class-area-control")
+    assert from_zones.status == "ok" and from_zones.rows == [[1, 400.0, 131, 6.0]]
+    assert from_zones.gold_rows[0][:3] == [1, 400.0, 131] and from_zones.gold_rows[0][3] == pytest.approx(6.52)
+    assert not from_zones.passed
+    areas_as_zero = by_id.pop("missing-areas-as-zero-control")
+    assert areas_as_zero.status == "ok" and areas_as_zero.rows == [[0]] and areas_as_zero.gold_rows == [[None]]
+    assert not areas_as_zero.passed
     as_zero = by_id.pop("missing-as-zero-control")
     assert as_zero.status == "ok" and as_zero.rows == [[0, 0.0]] and as_zero.gold_rows == [[0, None]]
     assert not as_zero.passed

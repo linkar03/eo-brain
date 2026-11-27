@@ -37,7 +37,7 @@ follow-up answered by the data agent with its SQL and rows.*
 
 "Right values" is column-subset accuracy. The stricter comparison, the method and what the
 misses are: [Model-quality results](#model-quality-results). The suites have grown since that
-run, to 61 tool cases and 28 SQL cases. CI runs over 850 backend tests and over 110 frontend
+run, to 63 tool cases and 37 SQL cases. CI runs over 850 backend tests and over 110 frontend
 tests on every push.
 
 To run it: [Quickstart](#quickstart-docker-compose). What it does not do yet:
@@ -50,6 +50,7 @@ To run it: [Quickstart](#quickstart-docker-compose). What it does not do yet:
 - [Scenes and coverage](#scenes-and-coverage)
 - [Radiometry: from pixel values to reflectance](#radiometry-from-pixel-values-to-reflectance)
 - [Index values: how much green, how much water](#index-values-how-much-green-how-much-water)
+- [Flood and LISA: zones and areas](#flood-and-lisa-zones-and-areas)
 - [Voice input: the gesture](#voice-input-the-gesture)
 - [The deterministic boundary](#the-deterministic-boundary)
 - [The data agent and its isolation model](#the-data-agent-and-its-isolation-model)
@@ -290,6 +291,23 @@ References (bibliographic data checked on Crossref on 2026-11-27; the full texts
 - S. K. McFeeters (1996). The use of the Normalized Difference Water Index (NDWI) in the delineation of open water features. *International Journal of Remote Sensing* 17(7), 1425–1432. <https://doi.org/10.1080/01431169608948714>
 - H. Xu (2006). Modification of normalised difference water index (NDWI) to enhance open water features in remotely sensed imagery. *International Journal of Remote Sensing* 27(14), 3025–3033. <https://doi.org/10.1080/01431160600589179>
 
+## Flood and LISA: zones and areas
+
+A `flood` or `lisa` result is a class per pixel: a severity from 0 to 3 and, for LISA, a Moran quadrant. Two figures are stored for it, and they answer different questions: how many zones were mapped, and how much area each class covers.
+
+- **Zones** (table `alert_features`; views `agent.alert_areas` and `agent.analysis_severity_summary`) are the alert polygons on the map. A zone is a patch of 4-connected pixels of one severity and, for LISA, one quadrant, inside the requested box, of at least 4 pixels (`MIN_ZONE_PIXELS` in `eo_brain/api/main.py`). For LISA the vectoriser (`eo_brain/algorithms/vectorize.py`) labels each pixel with its severity and quadrant together. A patch holding both high (HL) and low (LH) outliers therefore becomes one zone per quadrant, and every zone has the quadrant of all its pixels. LISA gives a severity to outliers only (`OUTLIER_QUADRANTS`), so every LISA zone is HL or LH, and the vectoriser refuses a LISA raster without its quadrants.
+- **What the zones leave out is recorded.** `result.vector_stats` holds the minimum zone size (`min_zone_pixels`, `min_zone_area_m2`), the number and area of the smaller patches (`skipped_small`, `skipped_small_area_m2`), and whether the limit of 50,000 zones stopped the mapping (`max_features_reached`). `agent.analyses` reads them as `min_zone_pixels`, `min_zone_area_m2`, `small_patches_left_out`, `small_patches_area_ha` and `zone_limit_reached`.
+- **Class areas** (table `severity_class_areas`, view `agent.severity_areas`, computed by `eo_brain/core/severity_areas.py`) count every covered pixel once, in its class. The `flood` classes are severities 0 to 3. The `lisa` classes are severity 0 with each quadrant 0 to 4 (0: not classified, because not vegetated or with no vegetated pixel around it), and severities 1 to 3 with HL or LH. Every class has a row, also when it is empty, so a sum over an empty class is 0, and a sum is NULL only when the analysis has no recorded areas. The table's checks refuse any other class, and its foreign key on the job's id and algorithm refuses a row for a job of another algorithm.
+- **The same pixels as the coverage.** The pixels counted are those `result.coverage` counts as covered, and their number must equal `covered_px`; a mismatch is refused rather than stored. `result.severity_areas` holds the pixel count per severity and, for LISA, the number of vegetated (classified) pixels. Zones and class areas describe the same pixels, so for every class the area of its zones plus the area of its small patches equals the class area. The pipeline test checks this on a synthetic cube, and the seed is built to satisfy it.
+- **Written with the completion, never at its expense.** As with the index intervals, the counts are plain numpy on the computed result, written in the transaction that completes the job, in a savepoint. If they fail, the job still completes and `result.severity_areas` holds the error.
+- **Not recorded:** analyses that completed before this was added. They have no class rows and no zone size: "not available", never 0. Their LISA zones have no quadrant, and their zones may reach into the margin of the result grid outside the requested box.
+
+**What changes for the zones.** Before, LISA zones carried no quadrant, because the pipeline called the vectoriser without the quadrant raster. Zones were mapped over the whole result grid, the margin outside the requested box included. Patches under 4 pixels were dropped without a count. The number of zones of an analysis changes too. A LISA patch holding both quadrants is split, and a split part can fall under the minimum size. Zones in the margin are no longer mapped, and zones across the box edge are cut at it. On the synthetic cube of `tests/test_pipeline_severity_areas.py` (69 × 65 pixels at 20 m, random reflectances), `flood` went from 31 zones to 24, and `lisa` from 6 to 5; 3 of the 6 earlier LISA zones held both quadrants. Real analyses were not re-run.
+
+**What the data agent sees.** `agent.severity_areas` has one row per class, with `severity_label` (`none`, `watch`, `suspect`, `alert`), `quadrant_label` (`HL`, `LH`, for the anomaly classes only), `area_ha`, `area_km2`, `pct_of_covered_area`, and for LISA `vegetated` and `pct_of_vegetated_area`. The vegetated pixels are those LISA classified: NDVI of at least 0.3, with vegetated pixels around them. The LISA rows of severity 0 are grouped into vegetated and not. The comment sends areas and shares here, and zone counts to `agent.alert_areas` and `agent.analysis_severity_summary`. Two prompt rules go with it. The data agent returns `min_zone_area_m2` and `small_patches_left_out` with any number of zones. The orchestrator states a zone count with the minimum size and the patches left out, says that a NULL figure is not available, and calls flood water "water detected". Neither rule is enforced by code; the gold queries of the SQL suite return those columns.
+
+**`flood` measures water seen in the period, not a flood.** Its severity comes from the highest water index of each pixel over the window (MNDWI, or NDWI when the scenes have no SWIR band): watch above 0, suspect above 0.2, alert above 0.35 (`FloodConfig`). Sea, lakes and rivers count as water, and there is no baseline period to compare with. The view comment and the orchestrator's rule say so; the analysis itself is unchanged (see [Limitations](#limitations)).
+
 ## Voice input: the gesture
 
 The rules live in a pure state machine (`frontend/src/hooks/micGesture.ts`), and the hook (`useSpeechInput.ts`) carries them out.
@@ -399,13 +417,13 @@ The descriptors removed before searching the bare name:
 | | Which column types may leave the database |
 | | The number of attempts |
 
-Two rules are **not** enforced by code: the instruction to "only state numbers that appear in the rows", and the data agent's rule to return any index threshold it filtered on as a column. The orchestrator prompt asks for the first, the data-agent prompt for the second, and the chat API returns the executed SQL and the rows next to the model's text, so a reader can check. The gate accepts the threshold queries as they are (literals, `SUM`, `CASE`, `FILTER`, `BETWEEN`): nothing was widened for them.
+Three rules are **not** enforced by code: the instruction to "only state numbers that appear in the rows", the data agent's rule to return any index threshold it filtered on as a column, and its rule to return the minimum zone size and the patches left out with any number of zones. The orchestrator prompt asks for the first, the data-agent prompt for the other two, and the chat API returns the executed SQL and the rows next to the model's text, so a reader can check. The gate accepts the threshold and class-area queries as they are (literals, `SUM`, `CASE`, `FILTER`, `BETWEEN`, scalar subqueries): nothing was widened for them.
 
-**Closed-set columns list their exact values.** A view column with a fixed set of values says so in its comment as `Values: 'HH', 'LL', 'HL', 'LH'`. Quoted text is the exact, case-sensitive value the view returns, and integer codes are bare. Explanations follow the list. The data-agent prompt says to filter those columns with `=` or `IN` on the listed values. `tests/test_db_view_values.py` (DB-backed) checks that each list is exactly what the column can produce. The expected values are not a second hand-written list. They come from what decides the values:
+**Closed-set columns list their exact values.** A view column with a fixed set of values says so in its comment as `Values: 'HL', 'LH'`. Quoted text is the exact, case-sensitive value the view returns, and integer codes are bare. Explanations follow the list. The data-agent prompt says to filter those columns with `=` or `IN` on the listed values. `tests/test_db_view_values.py` (DB-backed) checks that each list is exactly what the column can produce. The expected values are not a second hand-written list. They come from what decides the values:
 
 - the view's own `CASE` mappings, read back with `pg_get_viewdef`;
 - the `job_status` enum;
-- the Python constants the writers use: the algorithm registry, `Severity`, `MoranQuadrant`, `DISCRETE_OUTPUT_ALGORITHMS` and `CONTINUOUS_OUTPUT_ALGORITHMS`.
+- the Python constants the writers use: the algorithm registry, `Severity`, `MoranQuadrant`, `OUTLIER_QUADRANTS` (the quadrants a LISA anomaly, and so a LISA zone, can have), `DISCRETE_OUTPUT_ALGORITHMS` and `CONTINUOUS_OUTPUT_ALGORITHMS`.
 
 The test also pins the view's `CASE` mappings to those constants.
 
@@ -418,12 +436,13 @@ The test also pins the view's `CASE` mappings to those constants.
 - **a structured answer**: exactly one `run_sql(sql)` or `refuse(reason)` per turn. Gate rejections and database errors go back to it for at most 3 attempts in total, then it fails honestly with the last error.
 - **its own connection** as the role `agent_reader`, which is configured separately from the app's connection (`AGENT_DATABASE_URL`).
 
-It reads four views in schema `agent` (`eo_brain/db/agent_views.sql`), never the tables behind them:
+It reads five views in schema `agent` (`eo_brain/db/agent_views.sql`), never the tables behind them:
 
-- `agent.analyses`: one row per analysis (place, algorithm, window, status, coverage, and for `ndvi`, `ndwi` and `mndwi` the mean, lowest and highest value);
-- `agent.alert_areas`: one row per alert polygon of a `flood` or `lisa` analysis;
-- `agent.analysis_severity_summary`: the polygons per analysis and severity;
-- `agent.index_value_distribution`: the value intervals of the continuous indices (see [Index values](#index-values-how-much-green-how-much-water)).
+- `agent.analyses`: one row per analysis (place, algorithm, window, status, coverage; for `ndvi`, `ndwi` and `mndwi` the mean, lowest and highest value; for `flood` and `lisa` the minimum zone size and the patches left out);
+- `agent.alert_areas`: one row per mapped zone (alert polygon) of a `flood` or `lisa` analysis;
+- `agent.analysis_severity_summary`: the zones per analysis and severity;
+- `agent.index_value_distribution`: the value intervals of the continuous indices (see [Index values](#index-values-how-much-green-how-much-water));
+- `agent.severity_areas`: the area of every class of a `flood` or `lisa` analysis (see [Flood and LISA](#flood-and-lisa-zones-and-areas)).
 
 Two independent layers sit between the model and the data. Each one alone blocks writes.
 
@@ -508,7 +527,7 @@ docker compose up --build
 
 All three ports are published on `127.0.0.1` only: the API has no authentication and the database superuser is `postgres`/`postgres`.
 
-The database init scripts (`schema.sql`, `schema_vectors.sql`, `agent_views.sql`, `agent_role.sql`, and `agent_role_password.sh` to set the role password from `AGENT_DB_PASSWORD`) run **only on an empty data volume**. To add the data agent to an existing volume, or to bring one up to date (the table `index_value_bins` and the view `agent.index_value_distribution` were added later), apply the scripts by hand, in this order; they are idempotent:
+The database init scripts (`schema.sql`, `schema_vectors.sql`, `agent_views.sql`, `agent_role.sql`, and `agent_role_password.sh` to set the role password from `AGENT_DB_PASSWORD`) run **only on an empty data volume**. To add the data agent to an existing volume, or to bring one up to date (the tables `index_value_bins` and `severity_class_areas`, the unique key on `jobs (id, algorithm)` that the second one references, and the views `agent.index_value_distribution` and `agent.severity_areas` were added later), apply the scripts by hand, in this order; they are idempotent, and they keep the rows already stored:
 
 ```bash
 docker compose exec -T db psql -U postgres -d eo_brain < backend/eo_brain/db/schema_vectors.sql
@@ -630,6 +649,7 @@ These need no network, no database and no LLM. They cover:
   - the scenes whose rule cannot be determined, and the processing-baseline parsing;
   - the time slices of a mixed-rule day, the `radiometry` block and the refusal message;
 - the index value intervals (`tests/test_distribution.py`): known values in known intervals, the edges (a float32 0.65, exactly 1, values outside [-1, 1]), NaN and pixels outside the box left out, an empty input, the pixel count equal to the coverage's `covered_px` (and refused when it is not), the area from the grid spacing, threshold sums equal to a direct count, and that the synthetic seed's intervals add up to its coverage blocks;
+- the class areas of `flood` and `lisa` (`tests/test_severity_areas.py`): the classes of each algorithm, counts over the covered pixels only (NaN and outside the box left out), empty classes kept, counting in chunks, the pixel count equal to `covered_px` (and refused when it is not), the refusals (unknown severity or quadrant, a LISA severity on a cluster quadrant, a missing or extra quadrant layer, a bad pixel area, misaligned layers), the LISA algorithm producing only the classes recorded, and that the synthetic seed's class rows add up to its coverage and zone blocks;
 - the needs-user guard, which covers:
   - the live sequence "rejected at 730, retried at 365" and both calls in one model round;
   - a rerun after a block, and an invented place after "no previous area";
@@ -638,13 +658,13 @@ These need no network, no database and no LLM. They cover:
   - the block lasting one request only;
 - the kind of every validator rejection;
 - the SQL gate: over 200 accept and reject cases, including CTE-scope, quoting and lexer tricks, and the threshold queries over `agent.index_value_distribution` (still rejected: the table behind it, an unqualified name, casts to text, a missing `LIMIT`);
-- the data-agent loop, and the prompt rules on thresholds (both agents);
+- the data-agent loop, the prompt rules on thresholds (both agents), and those on zone counts, class areas and flood water (both agents);
 - the eval scorers, including how provider failures, the daily-quota stop and exit codes are handled.
 
 ```bash
 python -m pytest -q tests/test_agent_*.py tests/test_evals.py \
     tests/test_sql_gate.py tests/test_data_agent.py tests/test_sql_evals.py tests/test_eval_completeness.py \
-    tests/test_scenes.py tests/test_radiometry.py tests/test_distribution.py
+    tests/test_scenes.py tests/test_radiometry.py tests/test_distribution.py tests/test_severity_areas.py
 ```
 
 One test in `tests/test_scenes.py` and one in `tests/test_distribution.py` need pyproj (in `requirements.txt`) and are skipped without it; the original suite below runs them.
@@ -657,8 +677,9 @@ These are marked `db` and skipped unless `TEST_DATABASE_URL` is set. Each run cr
 - the executor;
 - the data agent end to end;
 - the scripted SQL suite;
-- the `Values:` lists in the view comments (`tests/test_db_view_values.py`), the coverage columns read back from the seeded results, and the thresholds their comments state (80% coverage, 95% cloud) against the Python constants;
-- the index value distribution (`tests/test_db_index_distribution.py`): threshold, range and share queries on the seeded intervals (the 0.64 / 0.65 and -0.01 / 0.00 edges included), shares that stay relative to the whole analysis under a filter, `value_mean` / `value_min` / `value_max` read from the distribution block and not from `result.summary`, interval pixel counts equal to `covered_px`, the table's checks, the cascade on job deletion, `agent_reader` reading the view but not the table, and `JobRepository.complete` writing, replacing and (on a bad row) skipping the intervals without failing the job.
+- the `Values:` lists in the view comments (`tests/test_db_view_values.py`), the coverage columns read back from the seeded results, and the thresholds their comments state (80% coverage, 95% cloud, the 50,000-zone limit, NDVI 0.3 for vegetation, the flood water-index thresholds) against the Python constants;
+- the index value distribution (`tests/test_db_index_distribution.py`): threshold, range and share queries on the seeded intervals (the 0.64 / 0.65 and -0.01 / 0.00 edges included), shares that stay relative to the whole analysis under a filter, `value_mean` / `value_min` / `value_max` read from the distribution block and not from `result.summary`, interval pixel counts equal to `covered_px`, the table's checks, the cascade on job deletion, `agent_reader` reading the view but not the table, and `JobRepository.complete` writing, replacing and (on a bad row) skipping the intervals without failing the job;
+- the class areas (`tests/test_db_severity_areas.py`): the rows of `agent.severity_areas` and their areas and shares on the seed, shares adding up to 100, NULL for an analysis with no recorded areas and 0 for an empty class, the zone-size columns of `agent.analyses`, zones plus small patches equal to the class area, LISA zones with an outlier quadrant, `agent_reader` reading the view but not the table, the cascade, the table's checks and foreign key, `JobRepository.complete` writing, replacing and (on a bad row) skipping the classes without failing the job; and the upgrade: a database built with the SQL files of commit a27bebf (`tests/fixtures/db_a27bebf/`), holding rows, brought up to date with the current files run twice, keeps every row, reads its old analyses as "not available", and ends with the same agent views, columns, comments and grants as a fresh database.
 
 ```bash
 docker run --rm -d --name eo-brain-test-db -e POSTGRES_PASSWORD=postgres \
@@ -667,7 +688,7 @@ docker run --rm -d --name eo-brain-test-db -e POSTGRES_PASSWORD=postgres \
 until docker exec eo-brain-test-db pg_isready -q -h 127.0.0.1 -U postgres; do sleep 1; done
 export TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/postgres
 python -m pytest -q -m db tests/test_db_agent.py tests/test_sql_evals.py tests/test_db_view_values.py \
-    tests/test_db_index_distribution.py
+    tests/test_db_index_distribution.py tests/test_db_severity_areas.py
 docker stop eo-brain-test-db
 ```
 
@@ -680,17 +701,19 @@ The original tests, plus the tile-server tests, need the full `requirements.txt`
 - the LISA, flood and index algorithms, including lazy (Dask) execution and chunk boundaries;
 - API request validation, including the area limit and job lookups, with the database stubbed;
 - the data-cube types (bounding box, time range, load configuration), the providers' cloud masks and radiometry rules, and how `load_items` groups scenes by day and rule and labels each slice (odc-stac replaced by a stand-in), with nothing fetched;
-- raster vectorisation;
+- raster vectorisation, including zones of one class (a LISA patch of both quadrants split in two), the area mask, the minimum size kept exactly, the limit reported, the zone statistics, and the refusal of a LISA raster without quadrants;
 - the tile server (`tests/test_tiles.py`), against small COGs written by the pipeline's own writer into a temp directory:
   - `/info` and `/bounds`;
   - default rendering of tiles and previews: never blank, and identical to the job's `tile_url`;
   - transparent nodata and exact class colours;
 - scene selection and coverage again (`tests/test_scenes.py`), now with the pyproj test of the requested-box mask, and the index value intervals again (`tests/test_distribution.py`) with the CRS check;
-- the analysis worker (`tests/test_pipeline_distribution.py`): `_run_analysis_sync` end to end for all five algorithms on a synthetic Sentinel-2 cube, with the catalogue, the scene choice, the load, the vectoriser and the job table stubbed. Every algorithm completes; for `ndvi`, `ndwi` and `mndwi` the stored intervals are exactly those of the result layer inside the box and add up to `covered_px`; `flood` and `lisa` store none; a distribution that cannot be computed leaves the job completed.
+- the analysis worker (`tests/test_pipeline_distribution.py`): `_run_analysis_sync` end to end for all five algorithms on a synthetic Sentinel-2 cube, with the catalogue, the scene choice, the load, the vectoriser and the job table stubbed. Every algorithm completes; for `ndvi`, `ndwi` and `mndwi` the stored intervals are exactly those of the result layer inside the box and add up to `covered_px`; `flood` and `lisa` store none; a distribution that cannot be computed leaves the job completed;
+- the class areas and zones through the same worker (`tests/test_pipeline_severity_areas.py`), with the real vectoriser and only its database write stubbed: the stored classes equal a direct count on the result layers and add up to `covered_px`; the zones equal an independent labelling (`scipy.ndimage.label`) per class inside the box, the smaller patches are the ones counted as left out, and per class zones plus small patches equal the class area; every LISA zone has an HL or LH quadrant (this fails if `api/main.py` stops passing the quadrant layer), flood zones have none; and a class count or a vectorisation that fails leaves the job completed.
 
 ```bash
 python -m pytest -q tests/test_algorithms.py tests/test_api.py tests/test_datacube.py tests/test_vectorize.py \
-    tests/test_tiles.py tests/test_scenes.py tests/test_distribution.py tests/test_pipeline_distribution.py
+    tests/test_tiles.py tests/test_scenes.py tests/test_distribution.py tests/test_pipeline_distribution.py \
+    tests/test_severity_areas.py tests/test_pipeline_severity_areas.py
 ```
 
 They need no network and no database, and CI runs them on Python 3.11 with `requirements.txt` (third job). `tests/test_integration.py` is marked `integration` and calls real STAC APIs; it is not part of that command and is not run in CI.
@@ -733,7 +756,7 @@ CI runs the type check, these tests and `vite build` on Node 24 (fourth job).
 
 `evals/run.py` runs versioned datasets through the real agent loops.
 
-**`tools` suite** (`evals/cases.v1.yaml`, 61 cases, Italian and English; the [model-quality results](#model-quality-results) below were measured on the 39 cases that existed on 2026-11-26). It covers text to tool call for the orchestrator:
+**`tools` suite** (`evals/cases.v1.yaml`, 63 cases, Italian and English; the [model-quality results](#model-quality-results) below were measured on the 39 cases that existed on 2026-11-26). It covers text to tool call for the orchestrator:
 
 - compact commands and natural language with time expressions;
 - follow-ups that rely on session memory;
@@ -750,6 +773,7 @@ CI runs the type check, these tests and `vite build` on Node 24 (fourth job).
   - Three counter-cases (a misspelt alias, a misspelt place, a day that does not exist, 2025-09-31) whose corrected retry must still create the job. Run live, they are ordinary cases with their own inputs.
 - questions about why a finished analysis looks the way it does (`it-why-partial-map`, `en-why-gaps-stored`). A case can accept more than one tool (`expect.tool_any_of`): either `get_job_status` or `query_database` passes, and no job may be created (`expect.job_created: false`).
 - how much green or water a stored result holds: three cases tagged `distribution` ("Quanto verde c'è nell'ultima analisi?", "How much water is there in the latest analysis?", and hectares above "0,5" in the latest NDVI analysis). Each must go to `query_database` and create no job; the third also requires the threshold in the question passed to the data agent (`question` is checkable for `query_database`, by phrase). **They have not been run against a live model.**
+- questions about the zones and areas of a stored `flood` or `lisa` result: two cases tagged `severity-areas` ("Quante anomalie sono state rilevate nell'ultima analisi LISA?", "What share of the area was under water in my last flood analysis?"). They name an analysis kind as a launch request does; each must go to `query_database` and create no job. **They have not been run against a live model.**
 
 Geocoding, job storage, the clock and the data agent are stubbed, so no network or database is needed. The stubbed clock reads 2026-01-15 12:00 UTC, and the model is told that date (the `TODAY` line the agent adds to the system prompt), so the calendar cases are written against it: "in August" means August 2025. The geocoding stub runs the real candidate choice on a fixed gazetteer, searched first, and on the Nominatim responses recorded on 2026-11-27 (`evals/fixtures/nominatim_recorded.json`, OpenStreetMap data, ODbL); the report records the recording's hash.
 
@@ -765,7 +789,7 @@ It reports:
 
 Each case in the report lists every call of the scored turn, with its arguments, error, `needs_user` and `blocked`.
 
-**`sql` suite** (`evals/sql_cases.v1.yaml`, 28 cases, Italian and English; the results below were measured on the 18 that existed on 2026-11-26, before the two coverage questions and the eight index-value questions were added). It covers question to SQL to rows for the data agent, on a scratch database with the synthetic seed:
+**`sql` suite** (`evals/sql_cases.v1.yaml`, 37 cases, Italian and English; the results below were measured on the 18 that existed on 2026-11-26, before the two coverage questions, the eight index-value questions and the nine flood and LISA questions were added, and before four of those 18 were revised, see below). It covers question to SQL to rows for the data agent, on a scratch database with the synthetic seed:
 
 - **Text-to-SQL cases** are scored by execution accuracy: the agent's result set must equal the gold SQL's result set. Rows are compared as a multiset (in order when the case sets `ordered: true`), column names are ignored, and numbers are rounded to 6 decimals. This **strict** comparison alone decides pass/fail. Because it is positional, an answer with an extra column, or with the right columns in another order, fails.
 - Next to it the suite reports a **lenient** figure that never decides pass/fail: **column-subset accuracy** (`column_subset_accuracy` in the summary, `column_subset_match` and `column_mapping` per case). A case matches when:
@@ -774,6 +798,8 @@ Each case in the report lists every call of the scored turn, with its arguments,
 
   Extra columns are tolerated; extra, missing or wrong rows are not. Numbers compare regardless of int or float (`3 == 3.0`), within a relative 1e-9 or absolute 1e-6. NULL equals only NULL, and text compares exactly. An empty gold result matches only an empty result. When several columns hold the same values, every mapping is tried, so the outcome does not depend on which column is picked first.
 - **Index-value cases** (tagged `distribution`, added with the stored value intervals; **not run against a live model**): an explicit threshold, the default green threshold, water with the default threshold, the share of the covered area, a range with a decimal comma ("tra 0,2 e 0,5"), June against December for one place, an analysis with no recorded distribution (the gold result is a NULL area, so an answer of 0 hectares fails), and a low-coverage analysis whose answer must carry `coverage_pct`. Every gold query returns the threshold as a column. The seed puts intervals on the edges that decide them (0.64 / 0.65, 0.49 / 0.50, -0.01 / 0.00).
+- **Flood and LISA cases** (tagged `zones` or `severity-areas`, added with the class areas; **not run against a live model**): the number of LISA anomalies, hectares and share of the covered area of the anomalies, the share of the vegetation that is anomalous, zones and hectares per quadrant, the water a flood analysis detected and its share, the water of an analysis with no recorded areas (the gold result is NULL, so 0 fails, and so does the zone total), an answer that needs both the alert zone count and the alert hectares (the zone area alone, 6 ha instead of 6.52, fails), and the zone count of an analysis from before, whose minimum zone size is NULL. Every gold query that counts zones also returns `min_zone_area_m2` and `small_patches_left_out`.
+- **Four cases were revised with the class areas,** after the live runs below: `en-sql-alert-ha-latest-flood` now takes the hectares from `agent.severity_areas` (12.64, where the zone total is 12); `en-sql-lisa-high-outliers` returns the HL zone count with the minimum zone size, the patches left out and the HL hectares of the class areas; `it-sql-poligoni-retry-after-db-error` returns the zone size columns with its counts; and `it-sql-allerta-per-localita` now asks for the mapped alert zones ("delle zone di allerta mappate"), with the same gold query, because the older analysis it sums has no class areas.
 - **Adversarial cases** are scored on being blocked: write requests, injection inside the question, other tables, system catalogues, settings and sleep, file reads, and geometry export. A refusal or an honest give-up counts as blocked. A few cases also accept a safe, gate-approved answer to the harmless part of the question.
 - **Every case** also fails if the database content changed or a returned value looks like raw geometry.
 
@@ -889,14 +915,15 @@ rows; that case passes on both models in the runs above.
 - **Gemini is the only live provider.** The provider interface is small, so adding a second one should not touch the agent loop, but none is implemented yet.
 - **The datasets are small and hand-written,** and the SQL suite runs on synthetic data. Live results vary between runs, and there is no repeat or variance reporting yet.
 - **"Only cite numbers from the rows" is a prompt rule,** not a code check. The UI shows the rows so it can be verified.
-- **Five more prompt rules are not enforced** (see [The deterministic boundary](#the-deterministic-boundary)):
+- **Six more prompt rules are not enforced** (see [The deterministic boundary](#the-deterministic-boundary)):
   - The model must not shorten an over-long window **before** its first call. Only a retry after a rejection is blocked.
   - The model must not run a supported analysis in place of an unsupported one.
   - The model must pass a calendar period as `start_date` and `end_date`, not as a look-back window, and with the dates the user meant.
   - The model must explain an analysis only from tool results, and say so when they do not explain it.
   - An area of green or water must be stated with its threshold (the data agent returns it as a column, the orchestrator quotes it), and a NULL area must not be reported as zero.
+  - A number of `flood` or `lisa` zones must be stated with the minimum zone size and the patches left out (the data agent returns them as columns), and `flood` water as water detected, permanent water included.
 
-  The `tools` suite measures the first two; it has cases for the third that have not been run against a live model; and it measures only the routing of the fourth: the text of a reply is not scored. For the fifth, the SQL suite's gold queries require the threshold column and the `tools` suite checks the routing; neither has been run against a live model, and the reply text is not scored.
+  The `tools` suite measures the first two; it has cases for the third that have not been run against a live model; and it measures only the routing of the fourth: the text of a reply is not scored. For the fifth and the sixth, the SQL suite's gold queries require the threshold and zone-size columns and the `tools` suite checks the routing; neither has been run against a live model, and the reply text is not scored.
 - **Calendar periods:**
   - Which dates the user's words mean is the model's reading, by a prompt rule: "in August" with no year is meant as the most recent August, and "to today" as today's date. Code validates the dates it is given, not that they match the request. How often a live model gets them right has not been measured.
   - Dates are UTC calendar days. A period runs from 00:00 UTC of its first day to the end of its last day, or to the moment of the request when it ends today, and "today" is the UTC date.
@@ -909,14 +936,20 @@ rows; that case passes on both models in the runs above.
   - The thresholds are conventions, not calibrated values. NDVI 0.65 for dense green vegetation is this app's choice; 0 for water with NDWI or MNDWI is the usual reading of those indices, not a value fitted to any place, season or sensor. The model picks the threshold, the default included, by a prompt rule.
   - The intervals are 0.01 wide, so a threshold resolves to 0.01, and "above 0" includes the pixels of exactly 0.
   - The areas describe the covered part of the requested area only. For a low-coverage analysis they describe less than was asked for; the view comment asks the model to return `coverage_pct` with them.
-  - Analyses that completed before the intervals were recorded have none, nor do `flood` and `lisa`. With the threshold filter in `WHERE`, the sum is NULL both for "no distribution" and for "no pixel above the threshold"; the view comment documents the form that tells them apart, but that form gives 0, not NULL, if the query starts from `agent.analyses` with a `LEFT JOIN`. How a live model handles it has not been measured.
+  - Analyses that completed before the intervals were recorded have none, nor do `flood` and `lisa` (their class areas are in `agent.severity_areas`). With the threshold filter in `WHERE`, the sum is NULL both for "no distribution" and for "no pixel above the threshold"; the view comment documents the form that tells them apart, but that form gives 0, not NULL, if the query starts from `agent.analyses` with a `LEFT JOIN`. How a live model handles it has not been measured.
   - Areas are pixel counts times the pixel area of the UTM result grid, like the alert polygons' areas, with no correction for the projection's scale factor.
   - `result.summary` (returned by `GET /jobs/{job_id}`) is unchanged: it is computed from the COG over the whole result grid, the margin outside the requested box included, and for a continuous index its `count_<n>` keys are not usable: each holds the pixel count of only the last distinct value that truncates to n (`_calculate_stats_from_cog` in `eo_brain/api/main.py`). The views read `result.value_distribution` instead.
 - **Coverage is measured on the result layer.** For `flood` it is the water index; a pixel counts as covered when any picked day saw it clear. The 80% threshold is a judgement (see [Scenes and coverage](#scenes-and-coverage)), not a calibrated value.
 - **The geocoder's choice rests on OSM names and Nominatim's importance.** The 90% ambiguity ratio is a judgement, not a calibrated value: a homonym further behind is resolved to the more important place without asking (Valencia, Spain over Valencia, Venezuela). The result names the place used, but the analysis runs on it. A place whose OSM names do not contain the user's words (a local or dialect name) is not found, and a descriptor without a kind ("dintorni di Siena") takes the town. The descriptor lists are fixed Italian and English words.
 - **The answer to a place question depends on the model.** Code pins the candidate when the model passes its text (or the place with words of one candidate only), and shows the model a note listing the candidates on the next request. It cannot check that the model read the user's answer correctly, and the live flow with a real model has not been measured.
 - **The geocoder shrinks oversized areas silently.** A place whose box exceeds 50,000 km² is clamped to about 47,500 km² around its centre (`clamp_geocoder_bbox`) and analysed without telling the user. This is a code-level substitution of a smaller area. It also makes the "area too large" rejection unreachable through the agent. The MNDWI band check is unreachable too, because the agent always uses a provider with SWIR bands.
-- **LISA polygons carry no quadrant in production.** The pipeline (`eo_brain/api/main.py`) calls `vectorize_cog` without a quadrant raster, so `quadrant` and `quadrant_label` are NULL for every real LISA polygon. Only the synthetic seed sets them.
+- **Flood and LISA zones and areas:**
+  - **`flood` counts permanent water.** It is water seen in the window, the sea, lakes and rivers included, not a change from a baseline: there is no reference period. A "flood" answer is the water detected in the period; the view comment and the orchestrator's rule say so, but the analysis does not separate flood water from permanent water.
+  - The class thresholds are the app's defaults, not calibrated values: water index above 0, 0.2 and 0.35 for `flood`; |z| of at least 0.8, 1.0 and 1.5 among spatial outliers, and NDVI 0.3 for vegetation, for `lisa`. The comments quote the defaults; a job created through `POST /analyze` with other values in `params` would not match them (the agent never sets them).
+  - The minimum zone of 4 pixels is a choice, and a zone has one severity, so one patch of mixed severity counts as several zones. Zone counts depend on both, which is why they are returned with `min_zone_area_m2` and `small_patches_left_out`.
+  - Mapping stops at 50,000 zones. Past that, `agent.alert_areas` lists fewer zones than the analysis has, and `small_patches_left_out` counts only the patches met before the stop; `zone_limit_reached` says so. The class areas are complete either way.
+  - Analyses that completed before the class areas were recorded have none, no zone size, and LISA zones with no quadrant; their zones may reach into the grid margin outside the requested box. They were not recomputed.
+  - Before this change, LISA zones had no quadrant (the pipeline called `vectorize_cog` without the quadrant raster), and zone totals were the only area, missing the patches under 4 pixels. Both are fixed for new analyses (see [Flood and LISA](#flood-and-lisa-zones-and-areas)).
 - **Data agent:**
   - It opens one database connection per query, with no pooling.
   - It does not back off on rate limits; it moves to the next model in the chain.
@@ -941,10 +974,10 @@ backend/
   eo_brain/agent/        orchestrator (brain.py), data agent, SQL gate, executor, providers, validators, geocoder
   eo_brain/algorithms/   NDVI / NDWI / MNDWI / flood / LISA, vectorisation
   eo_brain/api/          FastAPI app, raster tiles, vector tiles
-  eo_brain/core/         STAC providers, the Dask data cube, scene selection (scenes.py), coverage (coverage.py), radiometry (radiometry.py), index value intervals (distribution.py)
-  eo_brain/db/           schema (jobs, alert polygons, index value intervals), agent views, agent role, repositories
+  eo_brain/core/         STAC providers, the Dask data cube, scene selection (scenes.py), coverage (coverage.py), radiometry (radiometry.py), index value intervals (distribution.py), flood and LISA class areas (severity_areas.py)
+  eo_brain/db/           schema (jobs, alert polygons, index value intervals, class areas), agent views, agent role, repositories
   evals/                 datasets, runner, scorers, stubs, synthetic seed
-  tests/                 offline, DB-backed and original tests
+  tests/                 offline, DB-backed and original tests (fixtures/db_a27bebf: the SQL files before the class areas, for the upgrade test)
 frontend/                React + MapLibre dashboard and chat (src/api/config.ts: API URL; src/hooks/useSpeechInput.ts and micGesture.ts: voice input)
   Dockerfile             frontend image (Vite dev server)
 docs/images/             the screenshot at the top of this README

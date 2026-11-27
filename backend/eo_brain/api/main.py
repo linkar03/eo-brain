@@ -41,6 +41,7 @@ from eo_brain.core.coverage import (
     summarize_coverage, usable_pixels_per_slice,
 )
 from eo_brain.core.distribution import crs_in_metres, grid_pixel_area_m2, index_distribution
+from eo_brain.core.severity_areas import severity_areas
 from eo_brain.algorithms.base import get_algorithm, ALGORITHMS
 from eo_brain.db.database import job_repo, get_connection, close_pool
 from eo_brain.api.tiles import router as tiles_router, tile_query_for_algorithm
@@ -98,6 +99,14 @@ _running_tasks: Dict[UUID, asyncio.Task] = {}
 
 CONTINUOUS_OUTPUT_ALGORITHMS = {"ndvi", "ndwi", "mndwi"}
 DISCRETE_OUTPUT_ALGORITHMS = {"lisa", "flood"}
+
+# The result layers of the discrete outputs: the severity classes (the COG, the
+# zones and the class areas) and, for LISA, the Moran quadrant of each pixel.
+SEVERITY_LAYER = {"lisa": "lisa_severity", "flood": "flood_severity"}
+QUADRANT_LAYER = {"lisa": "lisa_quadrant"}
+# Smallest patch mapped as a zone, in pixels: smaller ones are noise (not mapped,
+# but counted in result.vector_stats and in the class areas).
+MIN_ZONE_PIXELS = 4
 
 ALGORITHM_BANDS = {
     "ndvi": ["red", "nir"],
@@ -317,6 +326,29 @@ def _value_distribution(job_id: UUID, algorithm: str, layer, inside, crs: str, c
     return dist.bins, dist.summary()
 
 
+def _severity_areas(job_id: UUID, algorithm: str, data, layer, inside, crs: str, coverage: Dict[str, Any]):
+    """
+    ``(classes, block)`` for a flood or lisa result: the pixel count and area of
+    every severity class (lisa: and Moran quadrant), stored in
+    severity_class_areas with the job, and ``result.severity_areas``, over the
+    pixels ``coverage`` counts as covered (core.severity_areas). Plain numpy on
+    the already computed result. A failure is logged and recorded in the block;
+    it never fails the job.
+    """
+    try:
+        if not crs_in_metres(crs):
+            raise ValueError(f"the result grid's CRS {crs} is not projected in metres")
+        quadrant = data[QUADRANT_LAYER[algorithm]].values if algorithm in QUADRANT_LAYER else None
+        areas = severity_areas(
+            algorithm, data[SEVERITY_LAYER[algorithm]].values, quadrant, layer.values, inside,
+            grid_pixel_area_m2(layer["x"].values, layer["y"].values), coverage["covered_px"],
+        )
+    except Exception as e:
+        logger.warning(f"Job {job_id}: severity areas not recorded (non-fatal): {e}")
+        return None, {"error": str(e)}
+    return areas.classes, areas.summary()
+
+
 # --- Analysis Pipeline ---
 
 def _optimal_chunks(resolution_m: int) -> dict:
@@ -432,11 +464,17 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
         logger.info(f"Job {job_id}: coverage {coverage['coverage_pct']}% of the requested area")
 
         # Continuous indices: how their values are spread over the same covered
-        # pixels (stored with the completion below). Discrete outputs get none.
+        # pixels; discrete outputs: the exact area of each class over them
+        # (both stored with the completion below).
         value_bins, value_distribution = None, None
         if request.algorithm in CONTINUOUS_OUTPUT_ALGORITHMS:
             value_bins, value_distribution = _value_distribution(
                 job_id, request.algorithm, layer, inside, load_result.crs, coverage
+            )
+        severity_classes, severity_block = None, None
+        if request.algorithm in DISCRETE_OUTPUT_ALGORITHMS:
+            severity_classes, severity_block = _severity_areas(
+                job_id, request.algorithm, result.data, layer, inside, load_result.crs, coverage
             )
 
         job_repo.update_progress(job_id, 65, "Generating map tiles...")
@@ -452,17 +490,11 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
                     ds=result.data, job_id=str(job_id), crs=load_result.crs,
                     bbox=request.bbox
                 )
-            elif request.algorithm == "flood":
+            elif request.algorithm in SEVERITY_LAYER:
                 cog_path = save_severity_cog(
                     ds=result.data, job_id=str(job_id), crs=load_result.crs,
                     bbox=request.bbox, algorithm=request.algorithm,
-                    severity_var="flood_severity"
-                )
-            elif request.algorithm == "lisa":
-                cog_path = save_severity_cog(
-                    ds=result.data, job_id=str(job_id), crs=load_result.crs,
-                    bbox=request.bbox, algorithm=request.algorithm,
-                    severity_var="lisa_severity"
+                    severity_var=SEVERITY_LAYER[request.algorithm]
                 )
             else:
                 cog_path = save_severity_cog(
@@ -483,16 +515,17 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
         vector_stats = None
         if request.algorithm in DISCRETE_OUTPUT_ALGORITHMS:
             try:
+                # Zones inside the requested area only (the pixels the class
+                # areas count), each of one severity and, for LISA, one quadrant.
+                quadrant_layer = QUADRANT_LAYER.get(request.algorithm)
                 vec_result = vectorize_cog(
                     cog_path=cog_path, job_id=job_id,
                     algorithm=request.algorithm,
-                    config=VectorizeConfig(min_area_pixels=4, simplify_tolerance_factor=0.5)
+                    quadrant_data=result.data[quadrant_layer].values if quadrant_layer else None,
+                    area_mask=inside,
+                    config=VectorizeConfig(min_area_pixels=MIN_ZONE_PIXELS, simplify_tolerance_factor=0.5)
                 )
-                vector_stats = {
-                    "feature_count": vec_result.feature_count,
-                    "total_area_m2": vec_result.total_area_m2,
-                    "by_severity": vec_result.by_severity
-                }
+                vector_stats = vec_result.stats()
             except Exception as e:
                 logger.warning(f"Job {job_id}: vectorization failed (non-fatal): {e}")
                 vector_stats = {"error": str(e)}
@@ -514,10 +547,12 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
                 "vector_stats": vector_stats, "coverage": coverage,
                 "radiometry": load_result.radiometry_summary(refused),
                 "value_distribution": value_distribution,
+                "severity_areas": severity_block,
             },
             cog_path=cog_path, output_crs=load_result.crs,
             message=" ".join(filter(None, [completion_message(coverage), refused_note(refused)])),
             value_bins=value_bins,
+            severity_classes=severity_classes,
         )
         logger.info(f"Job {job_id} completed successfully")
 

@@ -233,3 +233,123 @@ class TestEdgeCases:
         
         ok_features = [f for f in features if f["status"] == "ok"]
         assert len(ok_features) <= 10
+
+class TestZoneClasses:
+    """A zone is a 4-connected patch of one class, inside the area mask."""
+
+    @pytest.fixture
+    def transform(self):
+        return from_bounds(300000, 4500000, 300100, 4500100, 10, 10)   # 10 m pixels, 100 m2
+
+    def test_a_lisa_patch_of_both_quadrants_becomes_one_zone_per_quadrant(self, transform):
+        severity = np.zeros((10, 10), dtype=np.int8)
+        severity[2:6, 2:8] = 3                       # one severity-3 patch of 24 pixels...
+        quadrant = np.zeros_like(severity)
+        quadrant[2:6, 2:5] = 3                       # ...12 of them HL
+        quadrant[2:6, 5:8] = 4                       # ...12 of them LH
+        config = VectorizeConfig(min_area_pixels=4)
+        ok = [f for f in _extract_polygons(severity, transform, "EPSG:32633", config, quadrant) if f["status"] == "ok"]
+        assert sorted((f["severity"], f["quadrant"], round(f["area_m2"])) for f in ok) == [(3, 3, 1200), (3, 4, 1200)]
+        # without the quadrant raster it is the single zone of the old behaviour, with no quadrant
+        ok = [f for f in _extract_polygons(severity, transform, "EPSG:32633", config) if f["status"] == "ok"]
+        assert [(f["severity"], f["quadrant"], round(f["area_m2"])) for f in ok] == [(3, None, 2400)]
+
+    def test_the_area_mask_clips_zones_and_drops_those_outside(self, transform):
+        severity = np.zeros((10, 10), dtype=np.int8)
+        severity[0:4, 0:4] = 2                       # half outside the mask
+        severity[6:9, 6:9] = 3                       # all outside
+        inside = np.zeros((10, 10), dtype=bool)
+        inside[2:, :6] = True
+        out = list(_extract_polygons(severity, transform, "EPSG:32633", VectorizeConfig(min_area_pixels=4),
+                                     area_mask=inside))
+        assert [(f["status"], f["severity"], round(f["area_m2"])) for f in out] == [("ok", 2, 800)]
+
+    def test_a_patch_of_the_minimum_size_is_kept_and_a_smaller_one_reported(self, transform):
+        severity = np.zeros((10, 10), dtype=np.int8)
+        severity[0:2, 0:2] = 1                       # exactly 4 pixels
+        severity[5, 5:8] = 2                         # 3 pixels
+        out = list(_extract_polygons(severity, transform, "EPSG:32633", VectorizeConfig(min_area_pixels=4)))
+        assert sorted((f["status"], f["severity"]) for f in out) == [("ok", 1), ("small", 2)]
+        [small] = [f for f in out if f["status"] == "small"]
+        assert small["area"] == pytest.approx(300.0)
+
+    def test_the_limit_is_reported(self):
+        data = np.zeros((20, 20), dtype=np.uint8)
+        data[::2, ::2] = 3                           # 100 single pixels
+        out = list(_extract_polygons(data, from_bounds(0, 0, 200, 200, 20, 20), "EPSG:32633",
+                                     VectorizeConfig(min_area_pixels=1, max_features=5)))
+        assert sum(f["status"] == "ok" for f in out) == 5 and out[-1] == {"status": "limit"}
+
+
+class TestVectorize:
+    """vectorize_from_dataset (the same core as vectorize_cog) with the database write stubbed."""
+
+    @pytest.fixture
+    def inserted(self, monkeypatch):
+        from eo_brain.algorithms import vectorize as vectorize_mod
+
+        rows = []
+        monkeypatch.setattr(vectorize_mod.vector_repo, "bulk_insert", lambda features: rows.extend(features))
+        return rows
+
+    @pytest.fixture
+    def lisa(self):
+        severity = np.zeros((12, 12), dtype=np.int8)
+        quadrant = np.ones((12, 12), dtype=np.int8)        # HH background, no severity
+        severity[1:4, 1:4], quadrant[1:4, 1:4] = 3, 3      # HL zone, 9 px
+        severity[6:8, 6:9], quadrant[6:8, 6:9] = 1, 4      # LH zone, 6 px
+        severity[10, 10], quadrant[10, 10] = 2, 4          # LH patch, 1 px: left out
+        severity[0, 11], quadrant[0, 11] = 3, 3            # outside the mask
+        inside = np.ones((12, 12), dtype=bool)
+        inside[0, 11] = False
+        return severity, quadrant, inside, from_bounds(300000, 4500000, 300120, 4500120, 12, 12)
+
+    def test_zones_rows_and_stats(self, inserted, lisa):
+        from eo_brain.algorithms.vectorize import vectorize_from_dataset
+
+        severity, quadrant, inside, transform = lisa
+        job = uuid4()
+        result = vectorize_from_dataset(severity, quadrant, transform, "EPSG:32633", job, "lisa",
+                                        VectorizeConfig(min_area_pixels=4), area_mask=inside)
+        assert sorted((r["severity"], r["quadrant"], round(r["area_m2"])) for r in inserted) == [(1, 4, 600), (3, 3, 900)]
+        assert {r["job_id"] for r in inserted} == {str(job)} and {r["algorithm"] for r in inserted} == {"lisa"}
+        assert result.stats() == {
+            "feature_count": 2, "total_area_m2": pytest.approx(1500.0), "by_severity": {1: 1, 2: 0, 3: 1},
+            "min_zone_pixels": 4, "min_zone_area_m2": 400.0, "skipped_small": 1,
+            "skipped_small_area_m2": pytest.approx(100.0), "skipped_invalid": 0, "max_features_reached": False,
+        }
+        # zones + small patches = every pixel of severity 1 to 3 inside the mask
+        assert result.total_area_m2 + result.skipped_small_area_m2 == pytest.approx(((severity > 0) & inside).sum() * 100)
+
+    def test_flood_zones_have_no_quadrant(self, inserted):
+        from eo_brain.algorithms.vectorize import vectorize_from_dataset
+
+        severity = np.zeros((10, 10), dtype=np.int8)
+        severity[2:6, 2:6] = 2
+        vectorize_from_dataset(severity, None, from_bounds(0, 0, 100, 100, 10, 10), "EPSG:32633", uuid4(), "flood")
+        assert [r["quadrant"] for r in inserted] == [None]
+
+    @pytest.mark.parametrize("case, message", [
+        ("lisa without quadrants", "LISA zones need the Moran quadrant raster"),
+        ("flood with quadrants", "flood has no Moran quadrant"),
+        ("severity on a cluster", r"quadrants \[1, 3, 4\], expected \[3, 4\]"),
+        ("misaligned mask", "area_mask .* differ in shape"),
+    ])
+    def test_impossible_inputs_are_refused_before_any_write(self, inserted, lisa, case, message):
+        from eo_brain.algorithms.vectorize import vectorize_from_dataset
+
+        severity, quadrant, inside, transform = lisa
+        algorithm = "lisa"
+        if case == "lisa without quadrants":
+            quadrant = None
+        elif case == "flood with quadrants":
+            algorithm = "flood"
+        elif case == "severity on a cluster":
+            severity = severity.copy()
+            severity[5, 0] = 2                       # an HH pixel with a severity
+        else:
+            inside = inside[:, :-1]
+        with pytest.raises(ValueError, match=message):
+            vectorize_from_dataset(severity, quadrant, transform, "EPSG:32633", uuid4(), algorithm,
+                                   area_mask=inside)
+        assert inserted == []

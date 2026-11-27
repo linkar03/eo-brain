@@ -778,6 +778,20 @@ def test_prompt_states_a_threshold_with_every_figure_that_depends_on_one():
     assert "how much green or how much water) with query_database" in flat
 
 
+def test_prompt_states_zone_counts_with_their_size_and_flood_water_as_water_seen():
+    flat = " ".join(SYSTEM_PROMPT.split())
+    rule = flat.split(" 15. ")[1]
+    assert "state a number of zones (anomalies, flooded areas) with the minimum zone size" in rule
+    assert "the number of smaller patches left out" in rule
+    assert "permanent water (sea, lakes, rivers) included" in rule
+    assert "never newly flooded land or a change" in rule
+    assert "A NULL zone size, area or share is not available, never zero" in rule
+    # routing: such questions are about stored results
+    spec = next(t for t in TOOL_SPECS if t.name == "query_database")
+    assert "for flood and LISA, the hectares and share of each severity" in spec.description
+    assert "for flood and LISA, the hectares and share of each severity and how many zones were mapped" in flat
+
+
 # ---------------------------------------------------------------- module entry point
 
 def test_chat_without_api_key(monkeypatch):

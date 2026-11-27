@@ -26,14 +26,16 @@ version: 1
 
 cases:
   # ---------------------------------------------------------------- text -> SQL
+  # Hectares come from agent.severity_areas (every pixel), not from the mapped zones,
+  # which leave out the patches under the minimum zone size (002: 12.64 ha, zones 12 ha).
   - id: en-sql-alert-ha-latest-flood
     lang: en
-    tags: [aggregate]
+    tags: [aggregate, severity-areas]
     question: "How many hectares are at alert severity in the latest completed flood analysis?"
     expect:
       type: sql_result
       gold_sql: >-
-        SELECT total_area_ha FROM agent.analysis_severity_summary
+        SELECT sum(area_ha) FROM agent.severity_areas
         WHERE severity_label = 'alert' AND analysis_id = (
           SELECT analysis_id FROM agent.analyses
           WHERE algorithm = 'flood' AND status = 'completed'
@@ -41,8 +43,8 @@ cases:
         LIMIT 1
     scripted:
       - sql: >-
-          SELECT sum(area_ha) AS alert_ha FROM agent.alert_areas
-          WHERE severity_label = 'alert' AND analysis_id = (
+          SELECT sum(area_ha) AS alert_ha FROM agent.severity_areas
+          WHERE severity = 3 AND analysis_id = (
             SELECT analysis_id FROM agent.analyses
             WHERE algorithm = 'flood' AND status = 'completed'
             ORDER BY created_at DESC LIMIT 1)
@@ -111,7 +113,7 @@ cases:
   - id: it-sql-allerta-per-localita
     lang: it
     tags: [aggregate, group]
-    question: "Qual è la superficie totale in allerta, in ettari, per località?"
+    question: "Qual è la superficie totale delle zone di allerta mappate, in ettari, per località?"
     expect:
       type: sql_result
       gold_sql: >-
@@ -122,19 +124,34 @@ cases:
           SELECT location_name, sum(total_area_ha) AS ettari FROM agent.analysis_severity_summary
           WHERE severity = 3 GROUP BY location_name ORDER BY ettari DESC LIMIT 50
 
+  # A count of zones comes with the minimum zone size and the patches left out (data
+  # agent rule 10); the hectares with it come from agent.severity_areas (HL 8.10 ha,
+  # the two HL zones hold 6.5 ha).
   - id: en-sql-lisa-high-outliers
     lang: en
-    tags: [aggregate, lisa]
+    tags: [aggregate, lisa, zones, severity-areas]
     question: "How many LISA high outliers (HL) are there, and what is their total area in hectares?"
     expect:
       type: sql_result
       gold_sql: >-
-        SELECT count(*), sum(area_ha) FROM agent.alert_areas
-        WHERE algorithm = 'lisa' AND quadrant_label = 'HL' LIMIT 1
+        SELECT count(*), a.min_zone_area_m2, a.small_patches_left_out,
+               (SELECT sum(s.area_ha) FROM agent.severity_areas s
+                WHERE s.analysis_id = a.analysis_id AND s.quadrant_label = 'HL')
+        FROM agent.alert_areas f JOIN agent.analyses a ON a.analysis_id = f.analysis_id
+        WHERE f.algorithm = 'lisa' AND f.quadrant_label = 'HL'
+        GROUP BY a.analysis_id, a.min_zone_area_m2, a.small_patches_left_out
+        LIMIT 10
     scripted:
       - sql: >-
-          SELECT count(feature_id) AS n, round(sum(area_ha)::numeric, 2) AS ha FROM agent.alert_areas
-          WHERE algorithm = 'lisa' AND quadrant = 3 LIMIT 1
+          WITH zones AS (
+            SELECT analysis_id, count(feature_id) AS n FROM agent.alert_areas
+            WHERE algorithm = 'lisa' AND quadrant = 3 GROUP BY analysis_id)
+          SELECT z.n AS hl_zones, a.min_zone_area_m2, a.small_patches_left_out,
+                 sum(s.area_ha) AS hl_ha
+          FROM zones z JOIN agent.analyses a ON a.analysis_id = z.analysis_id
+          JOIN agent.severity_areas s ON s.analysis_id = z.analysis_id AND s.quadrant = 3
+          GROUP BY z.n, a.min_zone_area_m2, a.small_patches_left_out
+          LIMIT 10
 
   - id: it-sql-durata-media
     lang: it
@@ -161,23 +178,30 @@ cases:
 
   - id: it-sql-poligoni-retry-after-db-error
     lang: it
-    tags: [retry]
+    tags: [retry, zones]
     question: "Elenca le analisi di Testville North con il numero di poligoni di allerta"
     expect:
       type: sql_result
       gold_sql: >-
-        SELECT a.analysis_id, count(f.feature_id) FROM agent.analyses a
+        SELECT a.analysis_id, count(f.feature_id), a.min_zone_area_m2, a.small_patches_left_out
+        FROM agent.analyses a
         LEFT JOIN agent.alert_areas f ON f.analysis_id = a.analysis_id
-        WHERE a.location_name ILIKE '%testville north%' GROUP BY a.analysis_id LIMIT 50
+        WHERE a.location_name ILIKE '%testville north%'
+        GROUP BY a.analysis_id, a.min_zone_area_m2, a.small_patches_left_out LIMIT 50
     scripted:
       - sql: >-
-          SELECT a.analysis_id, count(f.polygon_id) FROM agent.analyses a
+          SELECT a.analysis_id, count(f.polygon_id), a.min_zone_area_m2, a.small_patches_left_out
+          FROM agent.analyses a
           LEFT JOIN agent.alert_areas f ON f.analysis_id = a.analysis_id
-          WHERE a.location_name ILIKE '%testville north%' GROUP BY a.analysis_id LIMIT 50
+          WHERE a.location_name ILIKE '%testville north%'
+          GROUP BY a.analysis_id, a.min_zone_area_m2, a.small_patches_left_out LIMIT 50
       - sql: >-
-          SELECT a.analysis_id, count(f.feature_id) AS poligoni FROM agent.analyses a
+          SELECT a.analysis_id, count(f.feature_id) AS poligoni,
+                 a.min_zone_area_m2 AS dimensione_minima_m2, a.small_patches_left_out AS macchie_escluse
+          FROM agent.analyses a
           LEFT JOIN agent.alert_areas f ON f.analysis_id = a.analysis_id
-          WHERE a.location_name ILIKE '%testville north%' GROUP BY a.analysis_id LIMIT 50
+          WHERE a.location_name ILIKE '%testville north%'
+          GROUP BY a.analysis_id, a.min_zone_area_m2, a.small_patches_left_out LIMIT 50
 
   # Coverage: "why is only part of the area covered" must be answerable from rows
   # (coverage_pct, uncovered_masked_pct / uncovered_no_data_pct, scene counts).
@@ -395,6 +419,220 @@ cases:
                   WHERE d.analysis_id = l.analysis_id AND d.value_from >= 0.65) AS green_ha,
                  l.coverage_pct
           FROM latest l
+          LIMIT 1
+
+  # Flood and LISA areas (agent.severity_areas: every covered pixel of each class) and
+  # zone counts (agent.alert_areas, returned with agent.analyses min_zone_area_m2 and
+  # small_patches_left_out: data agent rule 10). 001 (flood) ran before either was
+  # recorded: its areas are NULL, not 0. Seed figures: header of the seed file.
+  - id: en-sql-lisa-anomaly-count
+    lang: en
+    tags: [lisa, zones]
+    question: "How many anomalies did the latest LISA analysis find?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT count(f.feature_id), a.min_zone_area_m2, a.small_patches_left_out
+        FROM agent.analyses a LEFT JOIN agent.alert_areas f ON f.analysis_id = a.analysis_id
+        WHERE a.analysis_id = (SELECT analysis_id FROM agent.analyses WHERE algorithm = 'lisa'
+                               ORDER BY created_at DESC LIMIT 1)
+        GROUP BY a.min_zone_area_m2, a.small_patches_left_out
+        LIMIT 1
+    scripted:
+      - sql: >-
+          WITH latest AS (
+            SELECT analysis_id, min_zone_area_m2, small_patches_left_out FROM agent.analyses
+            WHERE algorithm = 'lisa' AND status = 'completed' ORDER BY created_at DESC LIMIT 1)
+          SELECT (SELECT count(*) FROM agent.alert_areas f WHERE f.analysis_id = l.analysis_id) AS zones,
+                 l.min_zone_area_m2, l.small_patches_left_out
+          FROM latest l
+          LIMIT 1
+
+  - id: it-sql-ettari-anomalie-lisa
+    lang: it
+    tags: [lisa, severity-areas, share]
+    question: "Quanti ettari di anomalie ci sono nell'ultima analisi LISA, e che percentuale dell'area coperta rappresentano?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT sum(area_ha), sum(pct_of_covered_area) FROM agent.severity_areas
+        WHERE severity >= 1 AND analysis_id = (
+          SELECT analysis_id FROM agent.analyses WHERE algorithm = 'lisa'
+          ORDER BY created_at DESC LIMIT 1)
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT sum(s.area_ha) AS ettari_anomalie, sum(s.pct_of_covered_area) AS percentuale_coperta
+          FROM agent.severity_areas s
+          WHERE s.severity_label IN ('watch', 'suspect', 'alert') AND s.analysis_id = (
+            SELECT analysis_id FROM agent.analyses WHERE algorithm = 'lisa' AND status = 'completed'
+            ORDER BY created_at DESC LIMIT 1)
+          LIMIT 1
+
+  - id: it-sql-quota-vegetazione-anomala
+    lang: it
+    tags: [lisa, severity-areas, share, vegetated]
+    question: "Che percentuale della vegetazione è anomala nell'ultima analisi LISA di Sample Plain?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT sum(pct_of_vegetated_area) FROM agent.severity_areas
+        WHERE severity >= 1 AND analysis_id = (
+          SELECT analysis_id FROM agent.analyses
+          WHERE algorithm = 'lisa' AND location_name ILIKE '%sample plain%'
+          ORDER BY created_at DESC LIMIT 1)
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT sum(pct_of_vegetated_area) FILTER (WHERE severity > 0) AS quota_vegetazione_anomala
+          FROM agent.severity_areas
+          WHERE location_name ILIKE '%sample plain%' AND analysis_id = (
+            SELECT analysis_id FROM agent.analyses
+            WHERE algorithm = 'lisa' AND location_name ILIKE '%sample plain%'
+            ORDER BY created_at DESC LIMIT 1)
+          LIMIT 1
+
+  - id: en-sql-lisa-zones-by-quadrant
+    lang: en
+    tags: [lisa, zones, quadrant]
+    question: "In the latest LISA analysis, how many mapped zones are high outliers and how many are low outliers?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT f.quadrant_label, count(*), a.min_zone_area_m2, a.small_patches_left_out
+        FROM agent.alert_areas f JOIN agent.analyses a ON a.analysis_id = f.analysis_id
+        WHERE f.analysis_id = (SELECT analysis_id FROM agent.analyses WHERE algorithm = 'lisa'
+                               ORDER BY created_at DESC LIMIT 1)
+        GROUP BY f.quadrant_label, a.min_zone_area_m2, a.small_patches_left_out
+        LIMIT 10
+    scripted:
+      - sql: >-
+          SELECT f.quadrant_label AS outlier, count(f.feature_id) AS zones,
+                 min(a.min_zone_area_m2) AS min_zone_m2, min(a.small_patches_left_out) AS small_patches
+          FROM agent.alert_areas f JOIN agent.analyses a ON a.analysis_id = f.analysis_id
+          WHERE f.quadrant_label IN ('HL', 'LH') AND f.analysis_id = (
+            SELECT analysis_id FROM agent.analyses WHERE algorithm = 'lisa'
+            ORDER BY created_at DESC LIMIT 1)
+          GROUP BY f.quadrant_label
+          LIMIT 10
+
+  - id: it-sql-ettari-per-quadrante
+    lang: it
+    tags: [lisa, severity-areas, quadrant]
+    question: "Quanti ettari di anomalie HL e quanti di anomalie LH ci sono nell'ultima analisi LISA?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT quadrant_label, sum(area_ha) FROM agent.severity_areas
+        WHERE severity >= 1 AND analysis_id = (
+          SELECT analysis_id FROM agent.analyses WHERE algorithm = 'lisa'
+          ORDER BY created_at DESC LIMIT 1)
+        GROUP BY quadrant_label
+        LIMIT 10
+    scripted:
+      - sql: >-
+          SELECT quadrant_label AS quadrante, sum(area_ha) AS ettari FROM agent.severity_areas
+          WHERE quadrant IN (3, 4) AND analysis_id = (
+            SELECT analysis_id FROM agent.analyses WHERE algorithm = 'lisa' AND status = 'completed'
+            ORDER BY created_at DESC LIMIT 1)
+          GROUP BY quadrant_label
+          LIMIT 10
+
+  - id: en-sql-flood-water-ha-share
+    lang: en
+    tags: [flood, severity-areas, water, share]
+    question: "How much water did the latest completed flood analysis detect, in hectares and as a share of the covered area?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT sum(area_ha), sum(pct_of_covered_area) FROM agent.severity_areas
+        WHERE severity >= 1 AND analysis_id = (
+          SELECT analysis_id FROM agent.analyses
+          WHERE algorithm = 'flood' AND status = 'completed'
+          ORDER BY created_at DESC LIMIT 1)
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT sum(area_ha) FILTER (WHERE severity > 0) AS water_ha,
+                 sum(pct_of_covered_area) FILTER (WHERE severity > 0) AS water_pct
+          FROM agent.severity_areas
+          WHERE analysis_id = (
+            SELECT analysis_id FROM agent.analyses
+            WHERE algorithm = 'flood' AND status = 'completed'
+            ORDER BY created_at DESC LIMIT 1)
+          LIMIT 1
+
+  # 001 ran before class areas were recorded: the water area is not available. The gold
+  # result is NULL; 0 fails, and so does the zone total (13 ha) given in its place.
+  - id: it-sql-acqua-alluvione-non-disponibile
+    lang: it
+    tags: [flood, severity-areas, water, missing]
+    question: "Quanti ettari di acqua ha rilevato l'analisi alluvione 00000000-0000-4000-a000-000000000001?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT sum(area_ha) FROM agent.severity_areas
+        WHERE analysis_id = '00000000-0000-4000-a000-000000000001' AND severity >= 1
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT sum(CASE WHEN severity > 0 THEN area_ha ELSE 0 END) AS ettari_acqua
+          FROM agent.severity_areas
+          WHERE analysis_id = '00000000-0000-4000-a000-000000000001'
+          LIMIT 1
+
+  # Both figures must be right: 1 alert zone (of at least 400 m2, 131 smaller patches
+  # left out) and 6.52 ha at alert severity (the zone alone holds 6 ha).
+  - id: en-sql-alert-zones-and-area
+    lang: en
+    tags: [lisa, zones, severity-areas]
+    question: "How many alert zones did the latest LISA analysis map, and how many hectares are at alert severity in it?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT (SELECT count(*) FROM agent.alert_areas f
+                WHERE f.analysis_id = a.analysis_id AND f.severity_label = 'alert'),
+               a.min_zone_area_m2, a.small_patches_left_out,
+               (SELECT sum(s.area_ha) FROM agent.severity_areas s
+                WHERE s.analysis_id = a.analysis_id AND s.severity_label = 'alert')
+        FROM agent.analyses a
+        WHERE a.analysis_id = (SELECT analysis_id FROM agent.analyses WHERE algorithm = 'lisa'
+                               ORDER BY created_at DESC LIMIT 1)
+        LIMIT 1
+    scripted:
+      - sql: >-
+          WITH latest AS (
+            SELECT analysis_id, min_zone_area_m2, small_patches_left_out FROM agent.analyses
+            WHERE algorithm = 'lisa' AND status = 'completed' ORDER BY created_at DESC LIMIT 1),
+          zones AS (
+            SELECT count(*) AS n FROM agent.alert_areas
+            WHERE severity = 3 AND analysis_id = (SELECT analysis_id FROM latest)),
+          area AS (
+            SELECT sum(area_ha) AS ha FROM agent.severity_areas
+            WHERE severity = 3 AND analysis_id = (SELECT analysis_id FROM latest))
+          SELECT z.n AS alert_zones, l.min_zone_area_m2, l.small_patches_left_out, r.ha AS alert_ha
+          FROM latest l, zones z, area r
+          LIMIT 1
+
+  # 001 has its zones but not their minimum size: the count is given, the size is NULL.
+  - id: it-sql-zone-alluvione-senza-dimensione
+    lang: it
+    tags: [flood, zones, missing]
+    question: "Quante zone ha mappato l'analisi alluvione 00000000-0000-4000-a000-000000000001, e di che dimensione minima?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT count(f.feature_id), a.min_zone_area_m2, a.small_patches_left_out
+        FROM agent.analyses a LEFT JOIN agent.alert_areas f ON f.analysis_id = a.analysis_id
+        WHERE a.analysis_id = '00000000-0000-4000-a000-000000000001'
+        GROUP BY a.min_zone_area_m2, a.small_patches_left_out
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT count(*) AS zone, max(a.min_zone_area_m2) AS dimensione_minima_m2,
+                 max(a.small_patches_left_out) AS macchie_escluse
+          FROM agent.alert_areas f JOIN agent.analyses a ON a.analysis_id = f.analysis_id
+          WHERE f.analysis_id = '00000000-0000-4000-a000-000000000001'
           LIMIT 1
 
   # ---------------------------------------------------------------- adversarial

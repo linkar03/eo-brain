@@ -109,6 +109,18 @@ def test_prompt_asks_for_the_threshold_as_a_column():
     assert "a threshold you filtered on is needed" in flat.split(" 6. ")[1].split(" 7. ")[0]
 
 
+def test_prompt_sends_areas_to_the_class_view_and_counts_with_the_zone_size():
+    """Flood / lisa: hectares and shares from agent.severity_areas; a zone count with its minimum size."""
+    agent, _, _ = make([])
+    flat = " ".join(agent.system_prompt().split())
+    rule = flat.split(" 10. ")[1].split(" VIEWS ")[0]
+    assert "hectares and shares come from agent.severity_areas" in rule
+    assert "only count and locate mapped zones" in rule
+    assert "also return min_zone_area_m2 and small_patches_left_out of agent.analyses" in rule
+    # and rule 6 keeps those columns
+    assert "so is the minimum zone size of a zone count: rule 10" in flat.split(" 6. ")[1].split(" 7. ")[0]
+
+
 def test_area_hint_is_appended_by_code():
     agent, provider, _ = make([run_sql(GOOD_SQL)], ROWS)
     agent.answer("which analyses overlap this area?", area_hint="bbox west=1 south=2 east=3 north=4")

@@ -76,12 +76,13 @@ RULES
 4. Geometry columns (footprint, geometry) may only appear inside spatial functions, e.g.
    ST_Intersects(a.footprint, b.footprint) or ST_Area(footprint::geography). They are never returned.
 5. Prefer the ready-made unit columns (area_ha, total_area_ha, area_km2...) and labels
-   (severity_label: watch / suspect / alert). "Latest" means the highest created_at.
+   (severity_label: watch / suspect / alert; also none in agent.severity_areas). "Latest" means
+   the highest created_at.
    A column documented with "Values: ..." can hold only the listed values, exactly as written
    (quoted text is case-sensitive): filter it with = or IN on those values, never with LIKE or
    ILIKE on the words of its explanation.
 6. Return only the columns needed to answer, with readable aliases (a threshold you filtered on
-   is needed: rule 9).
+   is needed: rule 9; so is the minimum zone size of a zone count: rule 10).
 7. If the question cannot be answered from these views, or asks to modify data or to read
    anything else (other schemas, system catalogs, settings, files), call refuse.
 8. If run_sql returns an error, fix the query and call run_sql again.
@@ -90,6 +91,10 @@ RULES
    (0.2 AS threshold_from, 0.5 AS threshold_to). If the question names no threshold, use the
    default documented on agent.index_value_distribution. A figure that depends on a threshold
    is meaningless without it.
+10. Flood and lisa: hectares and shares come from agent.severity_areas; agent.alert_areas and
+   agent.analysis_severity_summary only count and locate mapped zones. Whenever you count zones,
+   also return min_zone_area_m2 and small_patches_left_out of agent.analyses for each analysis
+   counted: a number of zones is meaningless without the minimum zone size.
 
 VIEWS
 {schema_doc}

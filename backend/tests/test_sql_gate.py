@@ -7,7 +7,7 @@ import pytest
 
 from eo_brain.agent.sql_gate import ALLOWED_FUNCTIONS, MAX_SQL_CHARS, SQLGate
 
-VIEWS = ["analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution"]
+VIEWS = ["analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution", "severity_areas"]
 
 
 @pytest.fixture(scope="module")

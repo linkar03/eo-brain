@@ -35,7 +35,7 @@ pytestmark = [
     pytest.mark.skipif(not ADMIN_URL, reason="TEST_DATABASE_URL not set (PostGIS superuser URL)"),
 ]
 
-VIEWS = {"analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution"}
+VIEWS = {"analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution", "severity_areas"}
 
 
 @pytest.fixture(scope="module")
@@ -96,6 +96,8 @@ def test_can_read_the_views(agent_conn):
     assert run(agent_conn, "SELECT count(*) FROM agent.analyses") == [(11,)]
     assert run(agent_conn, "SELECT count(*) FROM agent.alert_areas") == [(10,)]
     assert run(agent_conn, "SELECT count(*) FROM agent.index_value_distribution") == [(39,)]
+    # 002 flood: severities 0 to 3; 003 lisa: 6 anomaly classes and severity 0 vegetated or not
+    assert run(agent_conn, "SELECT count(*) FROM agent.severity_areas") == [(12,)]
     # geography maths works (needs the spatial_ref_sys grant)
     assert run(agent_conn, "SELECT count(*) FROM agent.analyses WHERE footprint_area_ha > 0") == [(11,)]
 
@@ -107,6 +109,7 @@ def test_can_read_the_views(agent_conn):
         "SELECT * FROM public.alert_features LIMIT 1",
         "SELECT * FROM public.alert_feature_stats LIMIT 1",
         "SELECT * FROM public.index_value_bins LIMIT 1",
+        "SELECT * FROM public.severity_class_areas LIMIT 1",
         "SELECT * FROM public.geometry_columns LIMIT 1",
         "SELECT * FROM public.geography_columns LIMIT 1",
         "SELECT pg_read_file('/etc/hostname')",
@@ -139,6 +142,7 @@ def test_writes_fail_in_the_default_read_only_transaction(agent_conn, sql):
     [
         "DELETE FROM public.jobs",
         "DELETE FROM public.index_value_bins",
+        "DELETE FROM public.severity_class_areas",
         "DELETE FROM agent.analyses",
         "UPDATE agent.analyses SET algorithm = 'x'",
         "INSERT INTO agent.analyses (algorithm) VALUES ('x')",
@@ -191,6 +195,9 @@ def test_schema_doc_comes_from_the_catalog(executor):
     assert "agent.index_value_distribution: How the index values of completed ndvi, ndwi and mndwi" in text
     assert "): Index of the analysis. Values: 'ndvi', 'ndwi', 'mndwi'." in text
     assert "always return the threshold used as a column" in text
+    assert "agent.severity_areas: Area of every severity class of completed flood and lisa" in text
+    assert "It includes permanent water (sea, lakes, rivers)" in text
+    assert "min_zone_area_m2 (double precision): The same minimum in square metres" in text
 
 
 def test_executor_never_returns_geometry(executor):

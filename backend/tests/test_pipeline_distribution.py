@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from eo_brain.algorithms.vectorize import VectorizeResult
 from eo_brain.api import cog as cog_mod
 from eo_brain.api import main
 from eo_brain.core import radiometry as rad
@@ -87,8 +88,10 @@ class RecordingRepo:
     def update_progress(self, *args, **kwargs):
         pass
 
-    def complete(self, job_id, result, cog_path, output_crs, message=None, value_bins=None):
-        self.completed.append(SimpleNamespace(result=result, message=message, value_bins=value_bins))
+    def complete(self, job_id, result, cog_path, output_crs, message=None, value_bins=None,
+                 severity_classes=None):
+        self.completed.append(SimpleNamespace(result=result, message=message, value_bins=value_bins,
+                                              severity_classes=severity_classes))
 
     def fail(self, job_id, message):
         self.failed.append(message)
@@ -106,8 +109,8 @@ def repo(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "DataCube", FakeCube)
     monkeypatch.setattr(main, "split_by_radiometry", lambda provider, items: (items, []))
     monkeypatch.setattr(main, "select_scenes", lambda *a, **k: selection)
-    monkeypatch.setattr(main, "vectorize_cog", lambda **k: SimpleNamespace(
-        feature_count=0, total_area_m2=0.0, by_severity={}))
+    monkeypatch.setattr(main, "vectorize_cog", lambda **k: VectorizeResult(
+        feature_count=0, total_area_m2=0.0, by_severity={}, skipped_small=0, skipped_invalid=0))
     monkeypatch.setattr(cog_mod, "OUTPUT_DIR", tmp_path)
     return rec
 
@@ -142,6 +145,12 @@ def test_every_algorithm_completes(repo, algorithm):
         assert all(b.value_to - b.value_from == pytest.approx(BIN_WIDTH) for b in done.value_bins)
     else:
         assert done.value_bins is None and done.result["value_distribution"] is None
+    # the class areas of the discrete outputs: tests/test_pipeline_severity_areas.py
+    if algorithm in main.DISCRETE_OUTPUT_ALGORITHMS:
+        assert sum(c.pixel_count for c in done.severity_classes) == cov["covered_px"]
+        assert "error" not in done.result["vector_stats"], done.result["vector_stats"]
+    else:
+        assert done.severity_classes is None and done.result["severity_areas"] is None
 
 
 def test_the_intervals_are_those_of_the_result_layer_inside_the_box(repo):

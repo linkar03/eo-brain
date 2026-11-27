@@ -12,11 +12,12 @@ what the view can produce:
   * the view's own CASE mappings, read back with pg_get_viewdef (labels);
   * the job_status enum in the database (status);
   * the Python constants the writers use: the algorithm registry (jobs are created only
-    with its keys, by the agent and by POST /analyze), Severity and MoranQuadrant
-    (eo_brain.algorithms.base), DISCRETE_OUTPUT_ALGORITHMS (eo_brain/api/main.py,
-    the algorithms whose results are vectorised into alert polygons) and
-    CONTINUOUS_OUTPUT_ALGORITHMS (the same file, the indices whose value intervals
-    are stored in index_value_bins).
+    with its keys, by the agent and by POST /analyze), Severity, MoranQuadrant and
+    OUTLIER_QUADRANTS (eo_brain.algorithms.base; the quadrants a LISA anomaly, and so
+    a LISA zone, can have), DISCRETE_OUTPUT_ALGORITHMS (eo_brain/api/main.py, the
+    algorithms whose results are vectorised into alert polygons and whose class areas
+    are stored in severity_class_areas) and CONTINUOUS_OUTPUT_ALGORITHMS (the same
+    file, the indices whose value intervals are stored in index_value_bins).
 
 The view's CASE mappings are themselves a copy of Severity / MoranQuadrant / the
 registry, so the first test pins those copies to the Python constants.
@@ -36,7 +37,7 @@ import sqlglot
 from sqlglot import exp
 
 import eo_brain
-from eo_brain.algorithms.base import ALGORITHMS, MoranQuadrant, Severity
+from eo_brain.algorithms.base import ALGORITHMS, OUTLIER_QUADRANTS, FloodConfig, LISAConfig, Severity
 from eo_brain.core.coverage import LOW_COVERAGE_PCT
 from eo_brain.core.scenes import DEFAULT_SELECTION
 from evals.db import create_scratch_db, drop_scratch_db
@@ -48,8 +49,9 @@ pytestmark = [
     pytest.mark.skipif(not ADMIN_URL, reason="TEST_DATABASE_URL not set (PostGIS superuser URL)"),
 ]
 
-VIEWS = ("analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution")
+VIEWS = ("analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution", "severity_areas")
 API_MAIN = Path(eo_brain.__file__).resolve().parent / "api" / "main.py"
+VECTORIZE = Path(eo_brain.__file__).resolve().parent / "algorithms" / "vectorize.py"
 
 _TOKEN = r"(?:'[^']*'|-?\d+)"
 _VALUES_RE = re.compile(rf"\bValues: ({_TOKEN}(?:, {_TOKEN})*)")
@@ -88,6 +90,17 @@ def _main_constant(name: str) -> Set[str]:
         if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             return set(ast.literal_eval(node.value))
     raise AssertionError(f"{name} is no longer a literal in {API_MAIN}")
+
+
+def _class_default(path: Path, cls: str, name: str) -> Any:
+    """A field default of a dataclass, read with ast (vectorize.py needs rasterio, not in CI)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == cls:
+            for item in node.body:
+                if isinstance(item, ast.AnnAssign) and getattr(item.target, "id", None) == name:
+                    return ast.literal_eval(item.value)
+    raise AssertionError(f"{cls}.{name} is no longer a literal default in {path}")
 
 
 def discrete_output_algorithms() -> Set[str]:
@@ -174,7 +187,8 @@ def expected(conn, mappings) -> Dict[tuple, Set[Any]]:
         WHERE a.attrelid = 'public.jobs'::regclass AND a.attname = 'status'
     """)}
     severity = {m.value: m.name.lower() for m in Severity if m is not Severity.NONE}
-    quadrant = {m.value: m.name for m in MoranQuadrant if m is not MoranQuadrant.NONE}
+    every_severity = {m.value: m.name.lower() for m in Severity}
+    quadrant = {m.value: m.name for m in OUTLIER_QUADRANTS}
     alert_algorithms = discrete_output_algorithms()
     return {
         ("analyses", "algorithm"): set(ALGORITHMS),
@@ -189,6 +203,11 @@ def expected(conn, mappings) -> Dict[tuple, Set[Any]]:
         ("analysis_severity_summary", "severity"): set(severity),
         ("analysis_severity_summary", "severity_label"): set(severity.values()),
         ("index_value_distribution", "algorithm"): continuous_output_algorithms(),
+        ("severity_areas", "algorithm"): alert_algorithms,
+        ("severity_areas", "severity"): set(every_severity),
+        ("severity_areas", "severity_label"): set(every_severity.values()),
+        ("severity_areas", "quadrant"): set(quadrant),
+        ("severity_areas", "quadrant_label"): set(quadrant.values()),
     }
 
 
@@ -196,12 +215,16 @@ def expected(conn, mappings) -> Dict[tuple, Set[Any]]:
 
 def test_view_case_mappings_match_the_python_constants(mappings):
     severity = {m.value: m.name.lower() for m in Severity if m is not Severity.NONE}
-    quadrant = {m.value: m.name for m in MoranQuadrant if m is not MoranQuadrant.NONE}
+    # LISA gives a severity, and the vectoriser a zone, to the outlier quadrants only.
+    quadrant = {m.value: m.name for m in OUTLIER_QUADRANTS}
     # Every algorithm a job can have gets a label, so the CASE's ELSE never fires.
     assert set(mappings["analyses"]["algorithm_label"]) == set(ALGORITHMS)
     assert mappings["alert_areas"]["severity_label"] == severity
     assert mappings["alert_areas"]["quadrant_label"] == quadrant
     assert mappings["analysis_severity_summary"]["severity_label"] == severity
+    # the class areas also hold severity 0
+    assert mappings["severity_areas"]["severity_label"] == {m.value: m.name.lower() for m in Severity}
+    assert mappings["severity_areas"]["quadrant_label"] == quadrant
     assert discrete_output_algorithms() <= set(ALGORITHMS)
     assert continuous_output_algorithms() <= set(ALGORITHMS)
     assert not continuous_output_algorithms() & discrete_output_algorithms()
@@ -236,6 +259,23 @@ def test_coverage_comments_state_the_python_thresholds(comments):
     assert f"coverage_pct is below {LOW_COVERAGE_PCT:g}:" in low, low
     cloudy = comments[("analyses", "scenes_too_cloudy")]
     assert f"was {DEFAULT_SELECTION.loose_cloud_bound:g} percent or more" in cloudy, cloudy
+
+
+def test_zone_and_class_comments_state_the_python_constants(comments):
+    """The zone limit, the vegetation threshold and the flood thresholds the comments quote."""
+    limit = _class_default(VECTORIZE, "VectorizeConfig", "max_features")
+    stop = comments[("analyses", "zone_limit_reached")]
+    assert f"its limit of {limit} zones" in stop, stop
+    vegetated = comments[("severity_areas", "vegetated")]
+    assert f"(NDVI of at least {LISAConfig.bio_gate:g})" in vegetated, vegetated
+
+
+def test_flood_thresholds_in_the_view_comment(conn):
+    [(text,)] = _fetch(conn, "SELECT obj_description('agent.severity_areas'::regclass, 'pg_class')")
+    cfg = FloodConfig()
+    assert (f"severity 1 above {cfg.water_threshold:g}, 2 above {cfg.flood_threshold:g}, "
+            f"3 above {cfg.severe_flood:g} (app defaults)") in text, text
+    assert "It includes permanent water" in text
 
 
 def test_coverage_columns_read_the_seeded_results(conn):

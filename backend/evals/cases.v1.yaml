@@ -749,6 +749,22 @@ cases:
         question: {matches: ["0.5", "0.50"]}
     scripted: {calls: [{tool: query_database, args: {question: "Quanti ettari dell'ultima analisi NDVI hanno NDVI sopra 0,5?"}}]}
 
+  # A count of LISA anomalies or the water share of a flood result names the analysis
+  # kind, like a launch request does: it is still a question about a stored result.
+  - id: it-route-query-anomalie-lisa
+    lang: it
+    tags: [routing, query, severity-areas]
+    input: "Quante anomalie sono state rilevate nell'ultima analisi LISA?"
+    expect: {type: tool_call, tool: query_database, job_created: false}
+    scripted: {calls: [{tool: query_database, args: {question: "Quante anomalie sono state rilevate nell'ultima analisi LISA?"}}]}
+
+  - id: en-route-query-flood-water-share
+    lang: en
+    tags: [routing, query, severity-areas]
+    input: "What share of the area was under water in my last flood analysis?"
+    expect: {type: tool_call, tool: query_database, job_created: false}
+    scripted: {calls: [{tool: query_database, args: {question: "What share of the covered area is water in the latest flood analysis?"}}]}
+
   - id: en-route-launch-not-query
     lang: en
     tags: [routing, launch]

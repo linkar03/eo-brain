@@ -151,6 +151,7 @@ class JobRepository:
         output_crs: str,
         message: Optional[str] = None,
         value_bins: Optional[Sequence[Any]] = None,
+        severity_classes: Optional[Sequence[Any]] = None,
     ):
         """
         Mark the job completed; ``message`` replaces the last progress message.
@@ -160,6 +161,9 @@ class JobRepository:
         job had. If that write fails (for example a database created before the
         table existed), it is rolled back on its own and logged: the job still
         completes, with no distribution recorded.
+
+        ``severity_classes`` (core.severity_areas.SeverityClass, flood and lisa
+        only) are written to severity_class_areas the same way.
         """
         sql = """
             UPDATE jobs
@@ -172,6 +176,8 @@ class JobRepository:
             with conn.cursor() as cur:
                 if value_bins is not None:
                     self._write_value_bins(cur, job_id, value_bins)
+                if severity_classes is not None:
+                    self._write_severity_classes(cur, job_id, severity_classes)
                 cur.execute(sql, (Json(result), cog_path, output_crs, message, str(job_id)))
 
     @staticmethod
@@ -194,6 +200,27 @@ class JobRepository:
         except psycopg2.Error as e:
             cur.execute("ROLLBACK TO SAVEPOINT value_bins")
             logger.warning(f"Job {job_id}: value distribution not stored: {str(e).strip()}")
+
+    @staticmethod
+    def _write_severity_classes(cur, job_id: UUID, classes: Sequence[Any]) -> None:
+        rows = [
+            (str(job_id), c.algorithm, c.severity, c.quadrant, c.pixel_count, c.area_m2)
+            for c in classes
+        ]
+        cur.execute("SAVEPOINT severity_classes")
+        try:
+            cur.execute("DELETE FROM severity_class_areas WHERE job_id = %s", (str(job_id),))
+            if rows:
+                execute_values(
+                    cur,
+                    "INSERT INTO severity_class_areas "
+                    "(job_id, algorithm, severity, quadrant, pixel_count, area_m2) VALUES %s",
+                    rows,
+                )
+            cur.execute("RELEASE SAVEPOINT severity_classes")
+        except psycopg2.Error as e:
+            cur.execute("ROLLBACK TO SAVEPOINT severity_classes")
+            logger.warning(f"Job {job_id}: severity areas not stored: {str(e).strip()}")
 
     def fail(self, job_id: UUID, message: str):
         sql = """

@@ -13,7 +13,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 import psycopg2
 from psycopg2 import sql as pgsql
@@ -44,7 +44,18 @@ def _admin(dsn: str):
     return conn
 
 
-def create_scratch_db(admin_url: str, *, seed: bool = True, prefix: str = "agent_scratch") -> ScratchDB:
+def create_scratch_db(
+    admin_url: str,
+    *,
+    seed: bool = True,
+    prefix: str = "agent_scratch",
+    files: Optional[Sequence[Path]] = None,
+) -> ScratchDB:
+    """
+    ``files`` replaces SCHEMA_FILES, applied in order (the upgrade tests build a
+    database from older copies of them); the agent_reader password is set after
+    them, so the last ones must create the role.
+    """
     name = f"{prefix}_{secrets.token_hex(4)}"
     password = secrets.token_urlsafe(16)
     conn = _admin(admin_url)
@@ -61,7 +72,7 @@ def create_scratch_db(admin_url: str, *, seed: bool = True, prefix: str = "agent
         conn = _admin(admin_dsn)
         try:
             with conn.cursor() as cur:
-                for path in SCHEMA_FILES:
+                for path in (SCHEMA_FILES if files is None else files):
                     cur.execute(path.read_text(encoding="utf-8"))
                 cur.execute(
                     pgsql.SQL("ALTER ROLE {} PASSWORD %s").format(pgsql.Identifier(AGENT_ROLE)), (password,)
@@ -106,6 +117,11 @@ def fingerprint(admin_dsn: str) -> Dict[str, Optional[str]]:
             )
             bins = cur.fetchone()
             cur.execute(
+                "SELECT count(*), md5(coalesce(string_agg(t::text, '|' ORDER BY job_id, severity, quadrant), '')) "
+                "FROM severity_class_areas t"
+            )
+            classes = cur.fetchone()
+            cur.execute(
                 "SELECT md5(string_agg(n.nspname || '.' || c.relname || ':' || c.relkind::text, ',' "
                 "ORDER BY n.nspname, c.relname)) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')"
@@ -123,6 +139,7 @@ def fingerprint(admin_dsn: str) -> Dict[str, Optional[str]]:
         "jobs": f"{jobs[0]}:{jobs[1]}",
         "alert_features": f"{feats[0]}:{feats[1]}",
         "index_value_bins": f"{bins[0]}:{bins[1]}",
+        "severity_class_areas": f"{classes[0]}:{classes[1]}",
         "relations": rels[0],
         "agent_role": role[0],
     }

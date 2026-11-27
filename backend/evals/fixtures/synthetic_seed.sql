@@ -5,7 +5,10 @@
 --
 -- Known answers (area_m2 values are stored as given, not derived from the
 -- toy geometries):
---   analysis ...001 flood   completed  Testville North  alert 8 ha (2 polys), suspect 4 ha, watch 1 ha
+--   analysis ...001 flood   completed  Testville North  alert 8 ha (2 polys), suspect 4 ha, watch 1 ha;
+--                                                       run before zone sizes and class areas were
+--                                                       recorded: old-style vector_stats, no
+--                                                       severity_class_areas rows
 --   analysis ...002 flood   completed  Testville North  alert 12 ha (1 poly), suspect 4.5 ha (2 polys)
 --   analysis ...003 lisa    completed  Sample Plain     alert 6 ha (HL), suspect 1.5 ha (LH), watch 0.5 ha (HL)
 --   analysis ...004 ndvi    completed  Testville North  no polygons (continuous index)
@@ -38,6 +41,17 @@
 --   result.value_distribution (agent.analyses value_mean / value_min / value_max) for 004
 --   and 007-010; 007 and 011 also carry an older-style result.summary with other numbers,
 --   which the views must not read.
+--   class areas (severity_class_areas, agent.severity_areas; 10 m pixels of 100 m2, pixel
+--   counts adding up to result.coverage.covered_px) and zone sizes (result.vector_stats,
+--   agent.analyses min_zone_* / small_patches_*) for 002 and 003 only:
+--     002 flood  water (severity >= 1) 1802 px = 18.02 ha, 0.2029 % of 888120 covered px:
+--                watch 0.52 ha, suspect 4.86 ha, alert 12.64 ha; the zones hold 16.5 ha;
+--                zones of at least 4 px = 400 m2; 76 smaller patches (1.52 ha) left out
+--     003 lisa   anomalies (severity >= 1) 1062 px = 10.62 ha, 0.1332 % of 797400 covered
+--                px, 0.1893 % of 561062 vegetated px: HL 8.10 ha (watch 1.70, suspect 0,
+--                alert 6.40), LH 2.52 ha (watch 0.60, suspect 1.80, alert 0.12); alert
+--                6.52 ha; zones of at least 4 px = 400 m2; 131 smaller patches (2.62 ha)
+--     001 (flood, older) has neither: its areas and zone sizes are not available.
 
 INSERT INTO jobs (id, status, algorithm, provider, bbox, start_date, end_date, params,
                   progress, message, created_at, completed_at, result)
@@ -49,23 +63,23 @@ VALUES
    100,
    'Completed: cloud-free data covers 97.8% of the requested area (4 acquisition days, 2025-12-14 to 2026-01-08).',
    '2026-01-10 09:00:00+00', '2026-01-10 09:01:35+00',
-   '{"coverage": {"coverage_pct": 97.8, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 2.2, "uncovered_no_data_pct": 0.0, "scenes_found": 14, "scenes_too_cloudy": 3, "scenes_checked": 11, "scenes_with_clear_pixels": 9, "scenes_used": 4, "acquisition_days_loaded": 4, "acquisition_days_with_data": 4, "first_date_with_data": "2025-12-14", "last_date_with_data": "2026-01-08"}}'),
+   '{"coverage": {"coverage_pct": 97.8, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 2.2, "uncovered_no_data_pct": 0.0, "scenes_found": 14, "scenes_too_cloudy": 3, "scenes_checked": 11, "scenes_with_clear_pixels": 9, "scenes_used": 4, "acquisition_days_loaded": 4, "acquisition_days_with_data": 4, "first_date_with_data": "2025-12-14", "last_date_with_data": "2026-01-08"}, "vector_stats": {"feature_count": 4, "total_area_m2": 130000.0, "by_severity": {"1": 1, "2": 1, "3": 2}}}'),
   ('00000000-0000-4000-a000-000000000002', 'completed', 'flood', 'element84-s2',
    ST_MakeEnvelope(11.02, 44.02, 11.12, 44.12, 4326),
    '2025-10-14 10:00:00+00', '2026-01-12 10:00:00+00',
-   '{"geocoded_name": "Testville North (synthetic)", "resolution_m": 20, "apply_cloud_mask": true}',
+   '{"geocoded_name": "Testville North (synthetic)", "resolution_m": 10, "apply_cloud_mask": true}',
    100,
    'Completed: cloud-free data covers 100% of the requested area (5 acquisition days, 2025-10-20 to 2026-01-04).',
    '2026-01-12 10:00:00+00', '2026-01-12 10:02:00+00',
-   '{"coverage": {"coverage_pct": 100.0, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 0.0, "uncovered_no_data_pct": 0.0, "scenes_found": 41, "scenes_too_cloudy": 6, "scenes_checked": 35, "scenes_with_clear_pixels": 30, "scenes_used": 5, "acquisition_days_loaded": 5, "acquisition_days_with_data": 5, "first_date_with_data": "2025-10-20", "last_date_with_data": "2026-01-04"}}'),
+   '{"coverage": {"coverage_pct": 100.0, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 0.0, "uncovered_no_data_pct": 0.0, "area_px": 888120, "covered_px": 888120, "scenes_found": 41, "scenes_too_cloudy": 6, "scenes_checked": 35, "scenes_with_clear_pixels": 30, "scenes_used": 5, "acquisition_days_loaded": 5, "acquisition_days_with_data": 5, "first_date_with_data": "2025-10-20", "last_date_with_data": "2026-01-04"}, "vector_stats": {"feature_count": 3, "total_area_m2": 165000.0, "by_severity": {"1": 0, "2": 2, "3": 1}, "min_zone_pixels": 4, "min_zone_area_m2": 400.0, "skipped_small": 76, "skipped_small_area_m2": 15200.0, "skipped_invalid": 0, "max_features_reached": false}, "severity_areas": {"algorithm": "flood", "pixels": 888120, "pixel_area_m2": 100.0, "area_m2": 88812000.0, "pixels_by_severity": {"0": 886318, "1": 52, "2": 486, "3": 1264}}}'),
   ('00000000-0000-4000-a000-000000000003', 'completed', 'lisa', 'element84-s2',
    ST_MakeEnvelope(12.00, 45.00, 12.10, 45.10, 4326),
    '2025-01-11 08:00:00+00', '2026-01-11 08:00:00+00',
-   '{"geocoded_name": "Sample Plain (synthetic)", "resolution_m": 30, "apply_cloud_mask": true}',
+   '{"geocoded_name": "Sample Plain (synthetic)", "resolution_m": 10, "apply_cloud_mask": true}',
    100,
    'Completed: cloud-free data covers 91.2% of the requested area (6 acquisition days, 2025-02-17 to 2025-12-28).',
    '2026-01-11 08:00:00+00', '2026-01-11 08:03:20+00',
-   '{"coverage": {"coverage_pct": 91.2, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 8.8, "uncovered_no_data_pct": 0.0, "scenes_found": 120, "scenes_too_cloudy": 22, "scenes_checked": 64, "scenes_with_clear_pixels": 51, "scenes_used": 6, "acquisition_days_loaded": 6, "acquisition_days_with_data": 6, "first_date_with_data": "2025-02-17", "last_date_with_data": "2025-12-28"}}'),
+   '{"coverage": {"coverage_pct": 91.2, "low_coverage": false, "low_coverage_below_pct": 80.0, "uncovered_masked_pct": 8.8, "uncovered_no_data_pct": 0.0, "area_px": 874200, "covered_px": 797400, "scenes_found": 120, "scenes_too_cloudy": 22, "scenes_checked": 64, "scenes_with_clear_pixels": 51, "scenes_used": 6, "acquisition_days_loaded": 6, "acquisition_days_with_data": 6, "first_date_with_data": "2025-02-17", "last_date_with_data": "2025-12-28"}, "vector_stats": {"feature_count": 3, "total_area_m2": 80000.0, "by_severity": {"1": 1, "2": 1, "3": 1}, "min_zone_pixels": 4, "min_zone_area_m2": 400.0, "skipped_small": 131, "skipped_small_area_m2": 26200.0, "skipped_invalid": 0, "max_features_reached": false}, "severity_areas": {"algorithm": "lisa", "pixels": 797400, "pixel_area_m2": 100.0, "area_m2": 79740000.0, "pixels_by_severity": {"0": 796338, "1": 230, "2": 180, "3": 652}, "vegetated_pixels": 561062}}'),
   ('00000000-0000-4000-a000-000000000004', 'completed', 'ndvi', 'element84-s2',
    ST_MakeEnvelope(11.00, 44.00, 11.10, 44.10, 4326),
    '2026-01-06 07:30:00+00', '2026-01-13 07:30:00+00',
@@ -191,3 +205,24 @@ VALUES
   ('00000000-0000-4000-a000-000000000010', 122,  0.22,  0.23,  18968,  7587200.0),
   ('00000000-0000-4000-a000-000000000010', 145,  0.45,  0.46,  26555, 10622000.0),
   ('00000000-0000-4000-a000-000000000010', 161,  0.61,  0.62,  11384,  4553600.0);
+
+-- Class areas of the flood and lisa analyses 002 and 003 (001 has none: run before
+-- they were recorded). Every class has a row, empty ones included; the pixel counts
+-- add up to each job's result.coverage.covered_px; area_m2 = pixel_count * 100.
+INSERT INTO severity_class_areas (job_id, algorithm, severity, quadrant, pixel_count, area_m2)
+VALUES
+  ('00000000-0000-4000-a000-000000000002', 'flood', 0, 0, 886318, 88631800.0),
+  ('00000000-0000-4000-a000-000000000002', 'flood', 1, 0,     52,     5200.0),
+  ('00000000-0000-4000-a000-000000000002', 'flood', 2, 0,    486,    48600.0),
+  ('00000000-0000-4000-a000-000000000002', 'flood', 3, 0,   1264,   126400.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  0, 0, 236338, 23633800.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  0, 1, 250000, 25000000.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  0, 2, 230000, 23000000.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  0, 3,  45000,  4500000.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  0, 4,  35000,  3500000.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  1, 3,    170,    17000.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  1, 4,     60,     6000.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  2, 3,      0,        0.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  2, 4,    180,    18000.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  3, 3,    640,    64000.0),
+  ('00000000-0000-4000-a000-000000000003', 'lisa',  3, 4,     12,     1200.0);
