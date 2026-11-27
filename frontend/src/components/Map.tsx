@@ -400,10 +400,13 @@ export function Map({
       }
     });
 
+    // Read the layers again: `styleLayers` still lists the ones removed just above,
+    // and with it a removed result's sources would stay in the style.
+    const remainingLayers = m.getStyle().layers || [];
     Object.keys(m.getStyle().sources || {}).forEach(srcId => {
       const match = srcId.match(/^(raster|vector)-(.+)$/);
       if (match && !activeIds.has(match[2])) {
-        const hasLayer = styleLayers.some(l => 'source' in l && l.source === srcId);
+        const hasLayer = remainingLayers.some(l => 'source' in l && l.source === srcId);
         if (!hasLayer) {
           try { m.removeSource(srcId); } catch { /* ignore */ }
         }
