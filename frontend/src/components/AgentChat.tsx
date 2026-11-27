@@ -6,6 +6,8 @@ import { SPEECH_LANGS, defaultSpeechLang, speechLangName, speechNoticeMessage, u
 import type { SpeechLang } from '../hooks/useSpeechInput';
 import { SILENCE_STOP_MS } from '../hooks/micGesture';
 import type { GestureMode } from '../hooks/micGesture';
+import { AgentText } from './agentText';
+
 const POLL_INTERVAL_MS = 2000;
 const MAX_POLL_ATTEMPTS = 150;
 
@@ -272,7 +274,9 @@ export function AgentChat({ onJobCompleted, onFlyTo }: AgentChatProps) {
             <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm leading-relaxed ${
               msg.role === 'user' ? 'bg-slate-800 text-white' : 'bg-gray-100 text-gray-800'
             }`}>
-              <p className="whitespace-pre-wrap">{msg.text}</p>
+              {msg.role === 'assistant'
+                ? <AgentText text={msg.text} />
+                : <p className="whitespace-pre-wrap">{msg.text}</p>}
               {msg.query && <QueryResult query={msg.query} />}
               {msg.jobId && msg.jobStatus && (
                 <JobStatusBadge
