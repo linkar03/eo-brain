@@ -765,6 +765,19 @@ def test_prompt_forbids_invented_causes():
     assert "get_job_status" in rule and "query_database" in rule
 
 
+def test_prompt_states_a_threshold_with_every_figure_that_depends_on_one():
+    flat = " ".join(SYSTEM_PROMPT.split())
+    rule = flat.split(" 14. ")[1]
+    assert "stated with that threshold, from the threshold column of the rows" in rule
+    assert "if the user named none, say it is the app's default" in rule
+    assert "NDVI 0.65 for dense green vegetation" in rule and "0 for water with NDWI or MNDWI" in rule
+    assert "A NULL area is not zero" in rule
+    # the question reaches the data agent with the user's threshold, and the routing says where it goes
+    spec = next(t for t in TOOL_SPECS if t.name == "query_database")
+    assert "how much green" in spec.description and "with any threshold the user gave" in spec.description
+    assert "how much green or how much water) with query_database" in flat
+
+
 # ---------------------------------------------------------------- module entry point
 
 def test_chat_without_api_key(monkeypatch):

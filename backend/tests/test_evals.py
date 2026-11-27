@@ -173,6 +173,26 @@ class TestScoring:
         assert not score_case(case, _result([_launch({"location": "Casentino"}, job=False)])).passed
         assert not score_case(case, _result([])).passed
 
+    def test_job_created_false_is_enforced(self):
+        """A routing case that says job_created: false fails if the turn also launched an analysis."""
+        case = {"id": "q", "expect": {"type": "tool_call", "tool": "query_database", "job_created": False}}
+        query = ToolInvocation("query_database", {"question": "Quanto verde c'è?"}, {"status": "ok"})
+        assert score_case(case, _result([query])).passed
+        both = score_case(case, _result([query, _launch({"location": "Firenze", "algorithm": "ndvi"})], "j1"))
+        assert both.tool_ok and both.job_created and not both.passed
+        # without the key, a non-job tool sets no rule on jobs (unchanged behaviour)
+        loose = {"id": "q", "expect": {"type": "tool_call", "tool": "query_database"}}
+        assert score_case(loose, _result([query, _launch({"location": "Firenze"})], "j1")).passed
+
+    def test_query_database_question_is_an_effective_argument(self):
+        case = {"id": "q", "expect": {"type": "tool_call", "tool": "query_database",
+                                      "args": {"question": {"matches": ["0.5"]}}}}
+        asked = ToolInvocation("query_database", {"question": "Hectares with NDVI above 0.5?"}, {"status": "ok"})
+        dropped = ToolInvocation("query_database", {"question": "Hectares of green?"}, {"status": "ok"})
+        assert score_case(case, _result([asked])).passed
+        r = score_case(case, _result([dropped]))
+        assert r.tool_ok and r.arg_checks == {"question": False} and not r.passed
+
     def test_missing_job_fails(self):
         r = score_case(CASE, _result([_launch({"location": "Firenze", "algorithm": "ndvi", "days_back": 90}, job=False)]))
         assert r.args_ok and not r.passed

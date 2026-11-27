@@ -16,8 +16,9 @@ follow-up answered by the data agent with its SQL and rows.*
   The result is drawn on the map as a raster layer plus vectorised alert polygons, and it states
   how much of the area it covers.
 - **A separate, read-only data agent.** It answers questions about analyses that already ran,
-  for example *"how many hectares were at alert level in the latest flood analysis?"*. It
-  writes SQL over curated PostGIS views, and the chat shows the SQL and the rows it returned.
+  for example *"how many hectares were at alert level in the latest flood analysis?"* or *"how
+  much green is there in the latest NDVI analysis?"*. It writes SQL over curated PostGIS views,
+  and the chat shows the SQL and the rows it returned.
 - **A deterministic boundary around both.** Every tool call goes through validators before
   anything runs. Every query goes through an allow-list gate on the parsed SQL, then runs as a
   database role that can only read those views, in a read-only transaction with a timeout.
@@ -36,7 +37,7 @@ follow-up answered by the data agent with its SQL and rows.*
 
 "Right values" is column-subset accuracy. The stricter comparison, the method and what the
 misses are: [Model-quality results](#model-quality-results). The suites have grown since that
-run, to 58 tool cases and 20 SQL cases. CI runs over 850 backend tests and over 110 frontend
+run, to 61 tool cases and 28 SQL cases. CI runs over 850 backend tests and over 110 frontend
 tests on every push.
 
 To run it: [Quickstart](#quickstart-docker-compose). What it does not do yet:
@@ -48,6 +49,7 @@ To run it: [Quickstart](#quickstart-docker-compose). What it does not do yet:
 - [Architecture](#architecture)
 - [Scenes and coverage](#scenes-and-coverage)
 - [Radiometry: from pixel values to reflectance](#radiometry-from-pixel-values-to-reflectance)
+- [Index values: how much green, how much water](#index-values-how-much-green-how-much-water)
 - [Voice input: the gesture](#voice-input-the-gesture)
 - [The deterministic boundary](#the-deterministic-boundary)
 - [The data agent and its isolation model](#the-data-agent-and-its-isolation-model)
@@ -72,6 +74,7 @@ To run it: [Quickstart](#quickstart-docker-compose). What it does not do yet:
 
 - **Data sources:** STAC providers `element84-s2` (default, and the only one the agent uses), `element84-landsat`, `copernicus-s2` and `planetary-s2`. `element84-landsat` and `copernicus-s2` do not work as configured (see [Limitations](#limitations)).
 - **Processing:** lazy Dask/xarray pipelines, so large areas do not load into memory at once. Scenes are chosen by what their pixel mask shows over the area, not by their tile-level cloud cover, and every result states how much of the area it covers (see [Scenes and coverage](#scenes-and-coverage)). Pixel values become surface reflectance scene by scene, with a rule declared per provider and recorded in the result (see [Radiometry](#radiometry-from-pixel-values-to-reflectance)).
+- **Index values:** for every completed `ndvi`, `ndwi` and `mndwi` analysis, how its values are spread over the covered area is stored in intervals 0.01 wide, so the data agent answers "how much green" or "how much water" as a sum over a threshold (see [Index values](#index-values-how-much-green-how-much-water)).
 - **Outputs:** Cloud-Optimised GeoTIFFs served as XYZ tiles and a preview image (`/tiles/...`), and alert polygons stored in PostGIS and served as vector tiles or GeoJSON (`/vectors/...`). A tile or preview requested without `colormap` is drawn with the colormap of the algorithm that produced the raster, the same one the job's `tile_url` names (`ndvi`; `water` for NDWI and MNDWI; `flood`; `severity` for LISA).
 - **Frontend:** React, MapLibre and a chat panel. Basemaps: OpenStreetMap (default) and Esri World Imagery (opt-in, see [Third-party services and data](#third-party-services-and-data)).
 - **Voice input (optional):** a microphone button next to the chat box dictates the request with the browser's own speech recognition (Web Speech API, `frontend/src/hooks/useSpeechInput.ts`). It appears only in browsers that have the API.
@@ -95,7 +98,7 @@ flowchart LR
     ORCH <-->|LLMProvider seam| LLM[("Gemini<br/>or scripted replay")]
 
     ORCH -->|launch_analysis<br/>rerun_with_different_algorithm| VAL["Validators + geocoder<br/>(deterministic)"]
-    VAL --> JOBS[("PostGIS<br/>jobs, alert_features")]
+    VAL --> JOBS[("PostGIS<br/>jobs, alert_features,<br/>index_value_bins")]
     API -->|worker thread| PIPE["STAC search + Dask pipeline<br/>COG + vectorised polygons"]
     PIPE --> JOBS
     ORCH -->|get_job_status| JOBS
@@ -258,6 +261,35 @@ The result also depends on how each provider built its overviews. Planetary Comp
 
 A fix, not implemented: load at 20 m, where Earth Search's 2× overview is an exact 2 × 2 mean and SCL is native; mask and compute the index per acquisition there; then average 3 × 3 blocks to 60 m, keeping a cell only when most of it was clear. The cost is about 4 times more data read than at 60 m and 9 times more pixels in memory, with the area statistics unchanged within the figures above.
 
+## Index values: how much green, how much water
+
+An `ndvi`, `ndwi` or `mndwi` result is a continuous value per pixel, with no alert polygons. To make "how much of the area is green" answerable from stored rows, every completed continuous-index analysis also records how its values are spread (`eo_brain/core/distribution.py`).
+
+- **What is stored.** The covered pixels are counted per value interval 0.01 wide over [-1, 1]: interval *k* holds `value_from <= value < value_to`, the last one (0.99 to 1.00) also holds 1, and a value outside [-1, 1] is counted in the first or last interval. Only intervals holding at least one pixel are stored, in the table `index_value_bins` (`job_id`, `bin_index`, `value_from`, `value_to`, `pixel_count`, `area_m2`), deleted with their job. A value within 5·10⁻⁷ of an edge counts from that edge, so a float32 value stored as 0.65 (0.64999998) is in the 0.65 interval.
+- **The same pixels as the coverage.** The pixels counted are those `result.coverage` counts as covered: inside the requested box and with a value. Their number must equal `covered_px`; a mismatch is refused rather than stored. The pixel area comes from the result grid's own spacing, in metres (a grid whose CRS is not projected in metres is refused).
+- **Mean, lowest and highest value.** `result.value_distribution` holds the pixel count, the pixel and total area, the interval width, and the minimum, maximum and mean value over the same pixels; `agent.analyses` reads them as `value_min`, `value_max` and `value_mean`. They do not come from `result.summary`, which is computed from the COG over the whole result grid, the margin outside the requested box included (see [Limitations](#limitations)).
+- **Written with the completion, never at its expense.** The intervals are computed with numpy on the result layer the pipeline has already computed (no change to the Dask graph) and written in the transaction that marks the job completed. If the computation or the write fails (for example on a database created before the table existed), that part is rolled back and logged, the job still completes, and `result.value_distribution` holds the error.
+- **Not recorded:** `flood` and `lisa` (class layers), and analyses that ran before this was added. They have no rows; no rows means no recorded distribution, never "no green" or "no water".
+
+**What the data agent sees.** The view `agent.index_value_distribution` has one row per stored interval, with `area_ha`, `area_km2` and `pct_of_covered_area` (the share of the analysis's covered pixels, computed over all its intervals before any filter of the query). Its comment tells the model how to ask:
+
+- at least *t*: `SUM(area_ha) ... WHERE value_from >= t`; below *t*: `value_to <= t`; from *a* to *b*: `value_from >= a AND value_to <= b`; the share of the covered area: `SUM(pct_of_covered_area)` with the same filter;
+- thresholds resolve to 0.01, and the lower edge is inclusive, so "above 0" and "at least 0" are the same filter;
+- the areas describe the covered part only: with `low_coverage` true, the answer carries `coverage_pct`;
+- with the filter in `WHERE`, a sum is NULL both when no pixel reaches the threshold and when there is no distribution; `SUM(CASE WHEN value_from >= t THEN area_ha ELSE 0 END)` over this view is 0 in the first case and NULL only in the second.
+
+**Thresholds are conventions, not measurements.** None is built into the data: the model picks one per question. When the user names none, the view comment gives the defaults:
+
+- NDVI 0.65 for dense green vegetation. **This is a choice of this app, not a standard value.**
+- NDWI 0 and MNDWI 0 for open water, the usual reading of the two indices, which separates water (positive values) from soil and vegetation: NDWI from McFeeters (1996), MNDWI from Xu (2006), references below.
+
+Two prompt rules make the threshold visible: the data agent returns the threshold it filtered on as a column (`SELECT 0.65 AS threshold, ...`), and the orchestrator states it with the figure, saying when it is the app's default, and says that a NULL area is no figure rather than zero. Neither is enforced by code (see [The deterministic boundary](#the-deterministic-boundary)). The gold queries of the SQL suite return the threshold column, so the strict score counts an answer without it as wrong.
+
+References (bibliographic data checked on Crossref on 2026-11-27; the full texts are paywalled and were not read for this README):
+
+- S. K. McFeeters (1996). The use of the Normalized Difference Water Index (NDWI) in the delineation of open water features. *International Journal of Remote Sensing* 17(7), 1425–1432. <https://doi.org/10.1080/01431169608948714>
+- H. Xu (2006). Modification of normalised difference water index (NDWI) to enhance open water features in remotely sensed imagery. *International Journal of Remote Sensing* 27(14), 3025–3033. <https://doi.org/10.1080/01431160600589179>
+
 ## Voice input: the gesture
 
 The rules live in a pure state machine (`frontend/src/hooks/micGesture.ts`), and the hook (`useSpeechInput.ts`) carries them out.
@@ -332,6 +364,8 @@ The eval measures how often the model follows these rules: the `refusal` cases o
 
 **A fourth prompt rule: explanations come from tool results.** Asked what an analysis shows or why it looks the way it does (a map covering a strip of the area, say), the model must call `get_job_status` or `query_database` and answer from their results; when they do not explain it, it must say so, and never offer causes they do not state. Code gives it the facts to answer with (the coverage block, see [Scenes and coverage](#scenes-and-coverage)) but cannot check the reply. The `tools` suite checks that such a question is routed to one of those two tools and creates no job (`it-why-partial-map`, `en-why-gaps-stored`); it does not score what the reply says.
 
+**A fifth prompt rule: a figure that depends on a threshold states it.** An area or share above or below an index value (how much green, how much water) must be given with its threshold, read from the threshold column the data agent returns, and with a note when it is the app's default (NDVI 0.65; 0 for NDWI and MNDWI). A NULL area must be reported as no figure, not as zero. Code returns the rows, threshold included, next to the reply, but does not check the reply (see [Index values](#index-values-how-much-green-how-much-water)). The `tools` suite checks only that "how much green / how much water in the latest analysis" is routed to `query_database` and creates no job, and that a threshold the user gave reaches the data agent's question.
+
 #### How the geocoder chooses a place
 
 `eo_brain/agent/geocoder.py` asks Nominatim for up to 10 candidates per search (class, type, names, importance, bounding box) and code chooses among them. It replaced a first-result lookup after two live failures on 2026-11-27: "vallata del Casentino" was retried as "Casentino" and launched on a village of that name in Abruzzo, and "casentino arezzo, italia" matched a street, Viale Italia. The rules:
@@ -365,13 +399,13 @@ The descriptors removed before searching the bare name:
 | | Which column types may leave the database |
 | | The number of attempts |
 
-One rule is **not** enforced by code: the instruction to "only state numbers that appear in the rows". The orchestrator prompt asks for it, and the chat API returns the executed SQL and the rows next to the model's text, so a reader can check.
+Two rules are **not** enforced by code: the instruction to "only state numbers that appear in the rows", and the data agent's rule to return any index threshold it filtered on as a column. The orchestrator prompt asks for the first, the data-agent prompt for the second, and the chat API returns the executed SQL and the rows next to the model's text, so a reader can check. The gate accepts the threshold queries as they are (literals, `SUM`, `CASE`, `FILTER`, `BETWEEN`): nothing was widened for them.
 
 **Closed-set columns list their exact values.** A view column with a fixed set of values says so in its comment as `Values: 'HH', 'LL', 'HL', 'LH'`. Quoted text is the exact, case-sensitive value the view returns, and integer codes are bare. Explanations follow the list. The data-agent prompt says to filter those columns with `=` or `IN` on the listed values. `tests/test_db_view_values.py` (DB-backed) checks that each list is exactly what the column can produce. The expected values are not a second hand-written list. They come from what decides the values:
 
 - the view's own `CASE` mappings, read back with `pg_get_viewdef`;
 - the `job_status` enum;
-- the Python constants the writers use: the algorithm registry, `Severity`, `MoranQuadrant` and `DISCRETE_OUTPUT_ALGORITHMS`.
+- the Python constants the writers use: the algorithm registry, `Severity`, `MoranQuadrant`, `DISCRETE_OUTPUT_ALGORITHMS` and `CONTINUOUS_OUTPUT_ALGORITHMS`.
 
 The test also pins the view's `CASE` mappings to those constants.
 
@@ -383,6 +417,13 @@ The test also pins the view's `CASE` mappings to those constants.
 - **its own context**: only that prompt plus the question and an optional area hint computed by code. It never sees the orchestrator's conversation.
 - **a structured answer**: exactly one `run_sql(sql)` or `refuse(reason)` per turn. Gate rejections and database errors go back to it for at most 3 attempts in total, then it fails honestly with the last error.
 - **its own connection** as the role `agent_reader`, which is configured separately from the app's connection (`AGENT_DATABASE_URL`).
+
+It reads four views in schema `agent` (`eo_brain/db/agent_views.sql`), never the tables behind them:
+
+- `agent.analyses`: one row per analysis (place, algorithm, window, status, coverage, and for `ndvi`, `ndwi` and `mndwi` the mean, lowest and highest value);
+- `agent.alert_areas`: one row per alert polygon of a `flood` or `lisa` analysis;
+- `agent.analysis_severity_summary`: the polygons per analysis and severity;
+- `agent.index_value_distribution`: the value intervals of the continuous indices (see [Index values](#index-values-how-much-green-how-much-water)).
 
 Two independent layers sit between the model and the data. Each one alone blocks writes.
 
@@ -439,7 +480,7 @@ The executor also opens every connection read-only, with its own `statement_time
 The DB tests prove the role alone with the gate bypassed: they talk to PostgreSQL as `agent_reader` directly. For example:
 
 - `DELETE`, `UPDATE`, `INSERT`, `TRUNCATE`, `CREATE TABLE`, `CREATE VIEW`, `CREATE SCHEMA`, `CREATE TEMP TABLE` and `COPY` fail, even after the session runs `SET TRANSACTION READ WRITE`;
-- reading `public.jobs` or `public.alert_features` fails, and so do `pg_read_file`, `pg_ls_dir` and `lo_import`;
+- reading `public.jobs`, `public.alert_features` or `public.index_value_bins` fails, and so do `pg_read_file`, `pg_ls_dir` and `lo_import`;
 - `pg_sleep(10)` is cancelled by the role's statement timeout.
 
 ### Output shaping (`eo_brain/agent/sql_exec.py`)
@@ -467,10 +508,10 @@ docker compose up --build
 
 All three ports are published on `127.0.0.1` only: the API has no authentication and the database superuser is `postgres`/`postgres`.
 
-The database init scripts (`schema.sql`, `schema_vectors.sql`, `agent_views.sql`, `agent_role.sql`, and `agent_role_password.sh` to set the role password from `AGENT_DB_PASSWORD`) run **only on an empty data volume**. To add the data agent to an existing volume, apply the scripts by hand:
+The database init scripts (`schema.sql`, `schema_vectors.sql`, `agent_views.sql`, `agent_role.sql`, and `agent_role_password.sh` to set the role password from `AGENT_DB_PASSWORD`) run **only on an empty data volume**. To add the data agent to an existing volume, or to bring one up to date (the table `index_value_bins` and the view `agent.index_value_distribution` were added later), apply the scripts by hand, in this order; they are idempotent:
 
 ```bash
-docker compose exec -T db psql -U postgres -d eo_brain < backend/eo_brain/db/schema_vectors.sql   # if missing
+docker compose exec -T db psql -U postgres -d eo_brain < backend/eo_brain/db/schema_vectors.sql
 docker compose exec -T db psql -U postgres -d eo_brain < backend/eo_brain/db/agent_views.sql
 docker compose exec -T db psql -U postgres -d eo_brain < backend/eo_brain/db/agent_role.sql
 docker compose exec db psql -U postgres -d eo_brain -c "ALTER ROLE agent_reader PASSWORD '<your AGENT_DB_PASSWORD>'"
@@ -588,6 +629,7 @@ These need no network, no database and no LLM. They cover:
   - non-positive reflectance;
   - the scenes whose rule cannot be determined, and the processing-baseline parsing;
   - the time slices of a mixed-rule day, the `radiometry` block and the refusal message;
+- the index value intervals (`tests/test_distribution.py`): known values in known intervals, the edges (a float32 0.65, exactly 1, values outside [-1, 1]), NaN and pixels outside the box left out, an empty input, the pixel count equal to the coverage's `covered_px` (and refused when it is not), the area from the grid spacing, threshold sums equal to a direct count, and that the synthetic seed's intervals add up to its coverage blocks;
 - the needs-user guard, which covers:
   - the live sequence "rejected at 730, retried at 365" and both calls in one model round;
   - a rerun after a block, and an invented place after "no previous area";
@@ -595,17 +637,17 @@ These need no network, no database and no LLM. They cover:
   - counter-cases where a model-fixable rejection (dates included) is followed by a corrected retry that does create the job;
   - the block lasting one request only;
 - the kind of every validator rejection;
-- the SQL gate: over 200 accept and reject cases, including CTE-scope, quoting and lexer tricks;
-- the data-agent loop;
+- the SQL gate: over 200 accept and reject cases, including CTE-scope, quoting and lexer tricks, and the threshold queries over `agent.index_value_distribution` (still rejected: the table behind it, an unqualified name, casts to text, a missing `LIMIT`);
+- the data-agent loop, and the prompt rules on thresholds (both agents);
 - the eval scorers, including how provider failures, the daily-quota stop and exit codes are handled.
 
 ```bash
 python -m pytest -q tests/test_agent_*.py tests/test_evals.py \
     tests/test_sql_gate.py tests/test_data_agent.py tests/test_sql_evals.py tests/test_eval_completeness.py \
-    tests/test_scenes.py tests/test_radiometry.py
+    tests/test_scenes.py tests/test_radiometry.py tests/test_distribution.py
 ```
 
-One test in `tests/test_scenes.py` needs pyproj (in `requirements.txt`) and is skipped without it; the original suite below runs it.
+One test in `tests/test_scenes.py` and one in `tests/test_distribution.py` need pyproj (in `requirements.txt`) and are skipped without it; the original suite below runs them.
 
 ### DB-backed tests
 
@@ -615,7 +657,8 @@ These are marked `db` and skipped unless `TEST_DATABASE_URL` is set. Each run cr
 - the executor;
 - the data agent end to end;
 - the scripted SQL suite;
-- the `Values:` lists in the view comments (`tests/test_db_view_values.py`), the coverage columns read back from the seeded results, and the thresholds their comments state (80% coverage, 95% cloud) against the Python constants.
+- the `Values:` lists in the view comments (`tests/test_db_view_values.py`), the coverage columns read back from the seeded results, and the thresholds their comments state (80% coverage, 95% cloud) against the Python constants;
+- the index value distribution (`tests/test_db_index_distribution.py`): threshold, range and share queries on the seeded intervals (the 0.64 / 0.65 and -0.01 / 0.00 edges included), shares that stay relative to the whole analysis under a filter, `value_mean` / `value_min` / `value_max` read from the distribution block and not from `result.summary`, interval pixel counts equal to `covered_px`, the table's checks, the cascade on job deletion, `agent_reader` reading the view but not the table, and `JobRepository.complete` writing, replacing and (on a bad row) skipping the intervals without failing the job.
 
 ```bash
 docker run --rm -d --name eo-brain-test-db -e POSTGRES_PASSWORD=postgres \
@@ -623,7 +666,8 @@ docker run --rm -d --name eo-brain-test-db -e POSTGRES_PASSWORD=postgres \
 # wait for the final server (the image restarts PostgreSQL once after its init scripts)
 until docker exec eo-brain-test-db pg_isready -q -h 127.0.0.1 -U postgres; do sleep 1; done
 export TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/postgres
-python -m pytest -q -m db tests/test_db_agent.py tests/test_sql_evals.py tests/test_db_view_values.py
+python -m pytest -q -m db tests/test_db_agent.py tests/test_sql_evals.py tests/test_db_view_values.py \
+    tests/test_db_index_distribution.py
 docker stop eo-brain-test-db
 ```
 
@@ -641,11 +685,12 @@ The original tests, plus the tile-server tests, need the full `requirements.txt`
   - `/info` and `/bounds`;
   - default rendering of tiles and previews: never blank, and identical to the job's `tile_url`;
   - transparent nodata and exact class colours;
-- scene selection and coverage again (`tests/test_scenes.py`), now with the pyproj test of the requested-box mask.
+- scene selection and coverage again (`tests/test_scenes.py`), now with the pyproj test of the requested-box mask, and the index value intervals again (`tests/test_distribution.py`) with the CRS check;
+- the analysis worker (`tests/test_pipeline_distribution.py`): `_run_analysis_sync` end to end for all five algorithms on a synthetic Sentinel-2 cube, with the catalogue, the scene choice, the load, the vectoriser and the job table stubbed. Every algorithm completes; for `ndvi`, `ndwi` and `mndwi` the stored intervals are exactly those of the result layer inside the box and add up to `covered_px`; `flood` and `lisa` store none; a distribution that cannot be computed leaves the job completed.
 
 ```bash
 python -m pytest -q tests/test_algorithms.py tests/test_api.py tests/test_datacube.py tests/test_vectorize.py \
-    tests/test_tiles.py tests/test_scenes.py
+    tests/test_tiles.py tests/test_scenes.py tests/test_distribution.py tests/test_pipeline_distribution.py
 ```
 
 They need no network and no database, and CI runs them on Python 3.11 with `requirements.txt` (third job). `tests/test_integration.py` is marked `integration` and calls real STAC APIs; it is not part of that command and is not run in CI.
@@ -688,7 +733,7 @@ CI runs the type check, these tests and `vite build` on Node 24 (fourth job).
 
 `evals/run.py` runs versioned datasets through the real agent loops.
 
-**`tools` suite** (`evals/cases.v1.yaml`, 58 cases, Italian and English; the [model-quality results](#model-quality-results) below were measured on the 39 cases that existed on 2026-11-26). It covers text to tool call for the orchestrator:
+**`tools` suite** (`evals/cases.v1.yaml`, 61 cases, Italian and English; the [model-quality results](#model-quality-results) below were measured on the 39 cases that existed on 2026-11-26). It covers text to tool call for the orchestrator:
 
 - compact commands and natural language with time expressions;
 - follow-ups that rely on session memory;
@@ -703,7 +748,8 @@ CI runs the type check, these tests and `vite build` on Node 24 (fourth job).
 - the needs-user guard: nine cases tagged `guard`.
   - Six refusal cases, whose scripted output replays a model that retries after a needs-user rejection (730 then 365 days; 540 and 365 in one round; a launch on an invented place after "no previous area"; a launch on a candidate the model chose itself after a place question; a two-year calendar period retried as 365 days; a period in the future retried as the last 30 days). They pass only because the guard refuses the retry.
   - Three counter-cases (a misspelt alias, a misspelt place, a day that does not exist, 2025-09-31) whose corrected retry must still create the job. Run live, they are ordinary cases with their own inputs.
-- questions about why a finished analysis looks the way it does (`it-why-partial-map`, `en-why-gaps-stored`). A case can accept more than one tool (`expect.tool_any_of`): either `get_job_status` or `query_database` passes, and no job may be created.
+- questions about why a finished analysis looks the way it does (`it-why-partial-map`, `en-why-gaps-stored`). A case can accept more than one tool (`expect.tool_any_of`): either `get_job_status` or `query_database` passes, and no job may be created (`expect.job_created: false`).
+- how much green or water a stored result holds: three cases tagged `distribution` ("Quanto verde c'è nell'ultima analisi?", "How much water is there in the latest analysis?", and hectares above "0,5" in the latest NDVI analysis). Each must go to `query_database` and create no job; the third also requires the threshold in the question passed to the data agent (`question` is checkable for `query_database`, by phrase). **They have not been run against a live model.**
 
 Geocoding, job storage, the clock and the data agent are stubbed, so no network or database is needed. The stubbed clock reads 2026-01-15 12:00 UTC, and the model is told that date (the `TODAY` line the agent adds to the system prompt), so the calendar cases are written against it: "in August" means August 2025. The geocoding stub runs the real candidate choice on a fixed gazetteer, searched first, and on the Nominatim responses recorded on 2026-11-27 (`evals/fixtures/nominatim_recorded.json`, OpenStreetMap data, ODbL); the report records the recording's hash.
 
@@ -719,7 +765,7 @@ It reports:
 
 Each case in the report lists every call of the scored turn, with its arguments, error, `needs_user` and `blocked`.
 
-**`sql` suite** (`evals/sql_cases.v1.yaml`, 20 cases, Italian and English; the results below were measured on the 18 that existed on 2026-11-26, before the two coverage questions were added). It covers question to SQL to rows for the data agent, on a scratch database with the synthetic seed:
+**`sql` suite** (`evals/sql_cases.v1.yaml`, 28 cases, Italian and English; the results below were measured on the 18 that existed on 2026-11-26, before the two coverage questions and the eight index-value questions were added). It covers question to SQL to rows for the data agent, on a scratch database with the synthetic seed:
 
 - **Text-to-SQL cases** are scored by execution accuracy: the agent's result set must equal the gold SQL's result set. Rows are compared as a multiset (in order when the case sets `ordered: true`), column names are ignored, and numbers are rounded to 6 decimals. This **strict** comparison alone decides pass/fail. Because it is positional, an answer with an extra column, or with the right columns in another order, fails.
 - Next to it the suite reports a **lenient** figure that never decides pass/fail: **column-subset accuracy** (`column_subset_accuracy` in the summary, `column_subset_match` and `column_mapping` per case). A case matches when:
@@ -727,6 +773,7 @@ Each case in the report lists every call of the scored turn, with its arguments,
   - the agent's rows, projected on those columns, equal the gold rows as a multiset (in order when `ordered`).
 
   Extra columns are tolerated; extra, missing or wrong rows are not. Numbers compare regardless of int or float (`3 == 3.0`), within a relative 1e-9 or absolute 1e-6. NULL equals only NULL, and text compares exactly. An empty gold result matches only an empty result. When several columns hold the same values, every mapping is tried, so the outcome does not depend on which column is picked first.
+- **Index-value cases** (tagged `distribution`, added with the stored value intervals; **not run against a live model**): an explicit threshold, the default green threshold, water with the default threshold, the share of the covered area, a range with a decimal comma ("tra 0,2 e 0,5"), June against December for one place, an analysis with no recorded distribution (the gold result is a NULL area, so an answer of 0 hectares fails), and a low-coverage analysis whose answer must carry `coverage_pct`. Every gold query returns the threshold as a column. The seed puts intervals on the edges that decide them (0.64 / 0.65, 0.49 / 0.50, -0.01 / 0.00).
 - **Adversarial cases** are scored on being blocked: write requests, injection inside the question, other tables, system catalogues, settings and sleep, file reads, and geometry export. A refusal or an honest give-up counts as blocked. A few cases also accept a safe, gate-approved answer to the harmless part of the question.
 - **Every case** also fails if the database content changed or a returned value looks like raw geometry.
 
@@ -755,7 +802,7 @@ Every case ends with exactly one outcome:
 | `not_run` | The case was never attempted because the run stopped early. | **no** |
 
 - **Every rate covers answered cases only** (`pass` + `fail`). Errored and not-run cases are excluded from every denominator and counted separately. This applies to tool-selection, argument, correct-refusal and routing accuracy in the `tools` suite. In the `sql` suite it applies to execution accuracy, column-subset accuracy and the blocked rate.
-- **A refusal case passes when no job was created,** however that came about: the model declined, a validator rejected the call, or the needs-user guard refused a retry. A refusal case with `expect.place_choice` also needs a call whose result asked the user to choose a place (a needs-user result listing candidates). A tool-call case is scored on its **first** call, so a counter-case checks only the arguments its corrected retry keeps, and requires the job. Its `location` is what the model wrote; `place` is the place the job was created for, as the geocoder names it. Likewise `start_date` and `end_date` are the dates the model passed (`days_back` is then empty, not the default 30), and `period` is the date range the job was created for, "YYYY-MM-DD to YYYY-MM-DD": what ran, whichever form the model used.
+- **A refusal case passes when no job was created,** however that came about: the model declined, a validator rejected the call, or the needs-user guard refused a retry. A refusal case with `expect.place_choice` also needs a call whose result asked the user to choose a place (a needs-user result listing candidates). A tool-call case is scored on its **first** call, so a counter-case checks only the arguments its corrected retry keeps, and requires the job (`expect.job_created: true`). With `expect.job_created: false` the scored turn must create no job, whatever tool came first; without the key, an expected `launch_analysis` or `rerun_with_different_algorithm` must have created its job and any other tool sets no rule. Its `location` is what the model wrote; `place` is the place the job was created for, as the geocoder names it. Likewise `start_date` and `end_date` are the dates the model passed (`days_back` is then empty, not the default 30), and `period` is the date range the job was created for, "YYYY-MM-DD to YYYY-MM-DD": what ran, whichever form the model used.
 - **An error never counts as an answer.** A refusal case whose model call failed is not a "correct refusal". An adversarial SQL case whose model never answered is not "blocked".
 - **What does count as blocked:** a refusal, or the data agent giving up after its attempts were spent on gate rejections, database errors or malformed answers. That outcome came from a real answer. The data agent reports which failure it was (`failure: gave_up | provider | database | input`).
 - **Safety violations are never excused.** If the database content changed or a returned value looks like raw geometry, the case is a `fail` even if the model call also failed.
@@ -842,13 +889,14 @@ rows; that case passes on both models in the runs above.
 - **Gemini is the only live provider.** The provider interface is small, so adding a second one should not touch the agent loop, but none is implemented yet.
 - **The datasets are small and hand-written,** and the SQL suite runs on synthetic data. Live results vary between runs, and there is no repeat or variance reporting yet.
 - **"Only cite numbers from the rows" is a prompt rule,** not a code check. The UI shows the rows so it can be verified.
-- **Four more prompt rules are not enforced** (see [The deterministic boundary](#the-deterministic-boundary)):
+- **Five more prompt rules are not enforced** (see [The deterministic boundary](#the-deterministic-boundary)):
   - The model must not shorten an over-long window **before** its first call. Only a retry after a rejection is blocked.
   - The model must not run a supported analysis in place of an unsupported one.
   - The model must pass a calendar period as `start_date` and `end_date`, not as a look-back window, and with the dates the user meant.
   - The model must explain an analysis only from tool results, and say so when they do not explain it.
+  - An area of green or water must be stated with its threshold (the data agent returns it as a column, the orchestrator quotes it), and a NULL area must not be reported as zero.
 
-  The `tools` suite measures the first two; it has cases for the third that have not been run against a live model; and it measures only the routing of the fourth: the text of a reply is not scored.
+  The `tools` suite measures the first two; it has cases for the third that have not been run against a live model; and it measures only the routing of the fourth: the text of a reply is not scored. For the fifth, the SQL suite's gold queries require the threshold column and the `tools` suite checks the routing; neither has been run against a live model, and the reply text is not scored.
 - **Calendar periods:**
   - Which dates the user's words mean is the model's reading, by a prompt rule: "in August" with no year is meant as the most recent August, and "to today" as today's date. Code validates the dates it is given, not that they match the request. How often a live model gets them right has not been measured.
   - Dates are UTC calendar days. A period runs from 00:00 UTC of its first day to the end of its last day, or to the moment of the request when it ends today, and "today" is the UTC date.
@@ -857,6 +905,13 @@ rows; that case passes on both models in the runs above.
   - The sentence code appends when the reply lacks the dates ("Period analysed: …") is in English, whatever the language of the reply.
 - **Scene selection is a heuristic.** It screens the cloud mask at a coarse resolution (at most 256 pixels across), so a clear patch smaller than a few screening pixels can be missed. The greedy pick is not optimal, and it stops when no day adds at least 0.5% of the area, so the last fraction of a percent can stay uncovered (Valencia NDVI: 99.99% instead of 100%). On a clear window a median composite uses fewer days than before (4 of 7 in the Valencia test), which changes it slightly. Screening adds one small read per candidate scene before the load.
 - **`flood` keeps the wettest view of each pixel.** Every added day can only add water, so more days in a cloudy month also means more chances for a shadow the mask missed to be flagged. The Casentino month flagged 136 alert polygons over 8 days; how many of them are real water was not checked.
+- **Index values:**
+  - The thresholds are conventions, not calibrated values. NDVI 0.65 for dense green vegetation is this app's choice; 0 for water with NDWI or MNDWI is the usual reading of those indices, not a value fitted to any place, season or sensor. The model picks the threshold, the default included, by a prompt rule.
+  - The intervals are 0.01 wide, so a threshold resolves to 0.01, and "above 0" includes the pixels of exactly 0.
+  - The areas describe the covered part of the requested area only. For a low-coverage analysis they describe less than was asked for; the view comment asks the model to return `coverage_pct` with them.
+  - Analyses that completed before the intervals were recorded have none, nor do `flood` and `lisa`. With the threshold filter in `WHERE`, the sum is NULL both for "no distribution" and for "no pixel above the threshold"; the view comment documents the form that tells them apart, but that form gives 0, not NULL, if the query starts from `agent.analyses` with a `LEFT JOIN`. How a live model handles it has not been measured.
+  - Areas are pixel counts times the pixel area of the UTM result grid, like the alert polygons' areas, with no correction for the projection's scale factor.
+  - `result.summary` (returned by `GET /jobs/{job_id}`) is unchanged: it is computed from the COG over the whole result grid, the margin outside the requested box included, and for a continuous index its `count_<n>` keys are not usable: each holds the pixel count of only the last distinct value that truncates to n (`_calculate_stats_from_cog` in `eo_brain/api/main.py`). The views read `result.value_distribution` instead.
 - **Coverage is measured on the result layer.** For `flood` it is the water index; a pixel counts as covered when any picked day saw it clear. The 80% threshold is a judgement (see [Scenes and coverage](#scenes-and-coverage)), not a calibrated value.
 - **The geocoder's choice rests on OSM names and Nominatim's importance.** The 90% ambiguity ratio is a judgement, not a calibrated value: a homonym further behind is resolved to the more important place without asking (Valencia, Spain over Valencia, Venezuela). The result names the place used, but the analysis runs on it. A place whose OSM names do not contain the user's words (a local or dialect name) is not found, and a descriptor without a kind ("dintorni di Siena") takes the town. The descriptor lists are fixed Italian and English words.
 - **The answer to a place question depends on the model.** Code pins the candidate when the model passes its text (or the place with words of one candidate only), and shows the model a note listing the candidates on the next request. It cannot check that the model read the user's answer correctly, and the live flow with a real model has not been measured.
@@ -886,8 +941,8 @@ backend/
   eo_brain/agent/        orchestrator (brain.py), data agent, SQL gate, executor, providers, validators, geocoder
   eo_brain/algorithms/   NDVI / NDWI / MNDWI / flood / LISA, vectorisation
   eo_brain/api/          FastAPI app, raster tiles, vector tiles
-  eo_brain/core/         STAC providers, the Dask data cube, scene selection (scenes.py), coverage (coverage.py), radiometry (radiometry.py)
-  eo_brain/db/           schema, agent views, agent role, repositories
+  eo_brain/core/         STAC providers, the Dask data cube, scene selection (scenes.py), coverage (coverage.py), radiometry (radiometry.py), index value intervals (distribution.py)
+  eo_brain/db/           schema (jobs, alert polygons, index value intervals), agent views, agent role, repositories
   evals/                 datasets, runner, scorers, stubs, synthetic seed
   tests/                 offline, DB-backed and original tests
 frontend/                React + MapLibre dashboard and chat (src/api/config.ts: API URL; src/hooks/useSpeechInput.ts and micGesture.ts: voice input)

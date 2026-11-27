@@ -80,10 +80,16 @@ RULES
    A column documented with "Values: ..." can hold only the listed values, exactly as written
    (quoted text is case-sensitive): filter it with = or IN on those values, never with LIKE or
    ILIKE on the words of its explanation.
-6. Return only the columns needed to answer, with readable aliases.
+6. Return only the columns needed to answer, with readable aliases (a threshold you filtered on
+   is needed: rule 9).
 7. If the question cannot be answered from these views, or asks to modify data or to read
    anything else (other schemas, system catalogs, settings, files), call refuse.
 8. If run_sql returns an error, fix the query and call run_sql again.
+9. Whenever you filter on an index value (value_from, value_to), return the threshold you
+   applied as a column, e.g. SELECT 0.65 AS threshold, ...; for a range, both bounds
+   (0.2 AS threshold_from, 0.5 AS threshold_to). If the question names no threshold, use the
+   default documented on agent.index_value_distribution. A figure that depends on a threshold
+   is meaningless without it.
 
 VIEWS
 {schema_doc}

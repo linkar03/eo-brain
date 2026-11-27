@@ -18,7 +18,7 @@
 -- tests/test_db_view_values.py checks every list against what the view can
 -- produce: the view's own CASE mappings, the job_status enum, and the Python
 -- constants the writers use (algorithm registry, Severity, MoranQuadrant,
--- DISCRETE_OUTPUT_ALGORITHMS).
+-- DISCRETE_OUTPUT_ALGORITHMS, CONTINUOUS_OUTPUT_ALGORITHMS).
 
 CREATE SCHEMA IF NOT EXISTS agent;
 COMMENT ON SCHEMA agent IS 'Read-only views over analysis jobs and their alert polygons, for the data agent.';
@@ -80,11 +80,21 @@ SELECT
     CASE WHEN (j.result -> 'coverage' ->> 'first_date_with_data') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
          THEN (j.result -> 'coverage' ->> 'first_date_with_data')::date END AS first_acquisition,
     CASE WHEN (j.result -> 'coverage' ->> 'last_date_with_data') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-         THEN (j.result -> 'coverage' ->> 'last_date_with_data')::date END AS last_acquisition
+         THEN (j.result -> 'coverage' ->> 'last_date_with_data')::date END AS last_acquisition,
+    -- Index statistics of continuous results over the covered pixels (api.main
+    -- writes result.value_distribution, core.distribution computes it; not
+    -- result.summary, which covers the whole result grid, a margin outside the
+    -- requested box included).
+    CASE WHEN jsonb_typeof(j.result -> 'value_distribution' -> 'mean') = 'number'
+         THEN (j.result -> 'value_distribution' ->> 'mean')::double precision END AS value_mean,
+    CASE WHEN jsonb_typeof(j.result -> 'value_distribution' -> 'min') = 'number'
+         THEN (j.result -> 'value_distribution' ->> 'min')::double precision END AS value_min,
+    CASE WHEN jsonb_typeof(j.result -> 'value_distribution' -> 'max') = 'number'
+         THEN (j.result -> 'value_distribution' ->> 'max')::double precision END AS value_max
 FROM public.jobs AS j;
 
 COMMENT ON VIEW agent.analyses IS
-    'One row per satellite analysis job (requested area, algorithm, time window, status; for completed jobs, how much of the area has data, and why the rest has none).';
+    'One row per satellite analysis job (requested area, algorithm, time window, status; for completed jobs, how much of the area has data, and why the rest has none; for ndvi, ndwi and mndwi, the mean, lowest and highest index value).';
 COMMENT ON COLUMN agent.analyses.analysis_id IS 'Unique id of the analysis (uuid).';
 COMMENT ON COLUMN agent.analyses.algorithm IS
     $$Algorithm code. Values: 'ndvi', 'ndwi', 'mndwi', 'flood', 'lisa'. Filter on this column, not on algorithm_label.$$;
@@ -125,6 +135,12 @@ COMMENT ON COLUMN agent.analyses.scenes_used IS 'Scenes actually loaded to compu
 COMMENT ON COLUMN agent.analyses.acquisition_days IS 'Acquisition days that contributed cloud-free pixels to the result.';
 COMMENT ON COLUMN agent.analyses.first_acquisition IS 'First acquisition day that contributed cloud-free pixels.';
 COMMENT ON COLUMN agent.analyses.last_acquisition IS 'Last acquisition day that contributed cloud-free pixels.';
+COMMENT ON COLUMN agent.analyses.value_mean IS
+    'Mean index value over the covered pixels of the requested area: the pixels counted by coverage_pct and by agent.index_value_distribution. Completed ndvi, ndwi and mndwi analyses only; NULL for flood and lisa, and for analyses run before it was recorded.';
+COMMENT ON COLUMN agent.analyses.value_min IS
+    'Lowest index value over the same covered pixels as value_mean; NULL in the same cases.';
+COMMENT ON COLUMN agent.analyses.value_max IS
+    'Highest index value over the same covered pixels as value_mean; NULL in the same cases.';
 
 -- ---------------------------------------------------------------- alert areas
 
@@ -151,7 +167,7 @@ FROM public.alert_features AS f
 JOIN public.jobs AS j ON j.id = f.job_id;
 
 COMMENT ON VIEW agent.alert_areas IS
-    'One row per alert polygon produced by a flood or lisa analysis (continuous indices like ndvi produce none).';
+    'One row per alert polygon produced by a flood or lisa analysis (continuous indices like ndvi produce none: their values are in agent.index_value_distribution).';
 COMMENT ON COLUMN agent.alert_areas.feature_id IS 'Unique id of the polygon.';
 COMMENT ON COLUMN agent.alert_areas.analysis_id IS 'Analysis that produced the polygon (agent.analyses.analysis_id).';
 COMMENT ON COLUMN agent.alert_areas.algorithm IS
@@ -211,3 +227,40 @@ COMMENT ON COLUMN agent.analysis_severity_summary.total_area_m2 IS 'Total polygo
 COMMENT ON COLUMN agent.analysis_severity_summary.total_area_ha IS 'Total polygon area in hectares.';
 COMMENT ON COLUMN agent.analysis_severity_summary.total_area_km2 IS 'Total polygon area in square kilometres.';
 COMMENT ON COLUMN agent.analysis_severity_summary.avg_area_m2 IS 'Mean polygon area in square metres.';
+
+-- ---------------------------------------------------------------- index value distribution
+
+-- api.main writes index_value_bins when a continuous-index job completes
+-- (core.distribution computes them over the covered pixels). The share is
+-- taken over all intervals of the job, before any filter of the caller.
+CREATE OR REPLACE VIEW agent.index_value_distribution AS
+SELECT
+    b.job_id                                    AS analysis_id,
+    j.algorithm                                 AS algorithm,
+    j.params ->> 'geocoded_name'                AS location_name,
+    j.created_at                                AS analysis_created_at,
+    b.value_from                                AS value_from,
+    b.value_to                                  AS value_to,
+    b.area_m2 / 1e4                             AS area_ha,
+    b.area_m2 / 1e6                             AS area_km2,
+    (100.0 * b.pixel_count / sum(b.pixel_count) OVER (PARTITION BY b.job_id))::double precision
+                                                AS pct_of_covered_area
+FROM public.index_value_bins AS b
+JOIN public.jobs AS j ON j.id = b.job_id;
+
+COMMENT ON VIEW agent.index_value_distribution IS
+    $$How the index values of completed ndvi, ndwi and mndwi analyses are spread over their covered area: one row per value interval 0.01 wide (value_from <= value < value_to) that holds at least one pixel; an interval with no pixel has no row. Area with an index value of at least t: SELECT t AS threshold, SUM(area_ha) FROM agent.index_value_distribution WHERE analysis_id = ... AND value_from >= t. Below t: value_to <= t. From a to b: value_from >= a AND value_to <= b. Share of the covered area: SUM(pct_of_covered_area) with the same filter. Thresholds resolve to 0.01 (round t to two decimals) and the lower edge is inclusive, so above t and at least t are the same filter. When the user names no threshold, use the app defaults: ndvi 0.65 for dense green vegetation (a choice of this app, not a standard); ndwi 0 and mndwi 0 for open water (the usual convention, water above 0; the interval from 0 also holds values of exactly 0). Thresholds are conventions, not measurements: always return the threshold used as a column. Areas describe only the covered part of the requested area, never the rest: when agent.analyses.low_coverage is TRUE, return its coverage_pct with the area. An analysis with no row here has no recorded distribution: analyses run before distributions were recorded, and every flood and lisa analysis. With the filter in WHERE, SUM is NULL both then and when no pixel reaches t; to tell the two apart, filter inside the sum: SUM(CASE WHEN value_from >= t THEN area_ha ELSE 0 END) is 0 when no pixel reaches t and NULL only when there is no distribution.$$;
+COMMENT ON COLUMN agent.index_value_distribution.analysis_id IS 'Analysis id (agent.analyses.analysis_id).';
+COMMENT ON COLUMN agent.index_value_distribution.algorithm IS
+    $$Index of the analysis. Values: 'ndvi', 'ndwi', 'mndwi'.$$;
+COMMENT ON COLUMN agent.index_value_distribution.location_name IS 'Place name of the analysis.';
+COMMENT ON COLUMN agent.index_value_distribution.analysis_created_at IS 'created_at of the analysis.';
+COMMENT ON COLUMN agent.index_value_distribution.value_from IS
+    'Lower edge of the interval, inclusive: a number with two decimals from -1.00 to 0.99. Filter at least t, and above t, with value_from >= t.';
+COMMENT ON COLUMN agent.index_value_distribution.value_to IS
+    'Upper edge of the interval, exclusive: value_from + 0.01; the last interval, 0.99 to 1.00, also holds 1. Filter below t with value_to <= t.';
+COMMENT ON COLUMN agent.index_value_distribution.area_ha IS
+    'Area in hectares of the covered pixels with a value in this interval (pixel count times the pixel area of the result grid). Add it up over the intervals selected.';
+COMMENT ON COLUMN agent.index_value_distribution.area_km2 IS 'The same area in square kilometres.';
+COMMENT ON COLUMN agent.index_value_distribution.pct_of_covered_area IS
+    'Percent (0 to 100) of the covered pixels of the analysis that fall in this interval; over all intervals of an analysis it adds up to 100. A share of the covered area, not of the requested area: times coverage_pct / 100 it becomes a share of the requested area.';

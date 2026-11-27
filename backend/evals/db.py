@@ -101,6 +101,11 @@ def fingerprint(admin_dsn: str) -> Dict[str, Optional[str]]:
             )
             feats = cur.fetchone()
             cur.execute(
+                "SELECT count(*), md5(coalesce(string_agg(t::text, '|' ORDER BY job_id, bin_index), '')) "
+                "FROM index_value_bins t"
+            )
+            bins = cur.fetchone()
+            cur.execute(
                 "SELECT md5(string_agg(n.nspname || '.' || c.relname || ':' || c.relkind::text, ',' "
                 "ORDER BY n.nspname, c.relname)) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')"
@@ -117,6 +122,7 @@ def fingerprint(admin_dsn: str) -> Dict[str, Optional[str]]:
     return {
         "jobs": f"{jobs[0]}:{jobs[1]}",
         "alert_features": f"{feats[0]}:{feats[1]}",
+        "index_value_bins": f"{bins[0]}:{bins[1]}",
         "relations": rels[0],
         "agent_role": role[0],
     }

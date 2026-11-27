@@ -95,6 +95,20 @@ def test_isolated_context_and_tools():
     assert "EO Brain" not in call.system_prompt  # not the orchestrator's prompt
 
 
+def test_prompt_asks_for_the_threshold_as_a_column():
+    """A figure filtered on an index value reaches the orchestrator with its threshold in the rows."""
+    agent, _, _ = make([])
+    flat = " ".join(agent.system_prompt().split())
+    rule = flat.split(" 9. ")[1].split(" VIEWS ")[0]
+    assert "filter on an index value (value_from, value_to)" in rule
+    assert "return the threshold you applied as a column" in rule
+    assert "SELECT 0.65 AS threshold" in rule
+    assert "both bounds" in rule
+    assert "default documented on agent.index_value_distribution" in rule
+    # rule 6 (only the columns needed) must not read as "drop the threshold"
+    assert "a threshold you filtered on is needed" in flat.split(" 6. ")[1].split(" 7. ")[0]
+
+
 def test_area_hint_is_appended_by_code():
     agent, provider, _ = make([run_sql(GOOD_SQL)], ROWS)
     agent.answer("which analyses overlap this area?", area_hint="bbox west=1 south=2 east=3 north=4")

@@ -35,7 +35,7 @@ pytestmark = [
     pytest.mark.skipif(not ADMIN_URL, reason="TEST_DATABASE_URL not set (PostGIS superuser URL)"),
 ]
 
-VIEWS = {"analyses", "alert_areas", "analysis_severity_summary"}
+VIEWS = {"analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution"}
 
 
 @pytest.fixture(scope="module")
@@ -93,10 +93,11 @@ def test_session_defaults(agent_conn):
 
 
 def test_can_read_the_views(agent_conn):
-    assert run(agent_conn, "SELECT count(*) FROM agent.analyses") == [(6,)]
+    assert run(agent_conn, "SELECT count(*) FROM agent.analyses") == [(11,)]
     assert run(agent_conn, "SELECT count(*) FROM agent.alert_areas") == [(10,)]
+    assert run(agent_conn, "SELECT count(*) FROM agent.index_value_distribution") == [(39,)]
     # geography maths works (needs the spatial_ref_sys grant)
-    assert run(agent_conn, "SELECT count(*) FROM agent.analyses WHERE footprint_area_ha > 0") == [(6,)]
+    assert run(agent_conn, "SELECT count(*) FROM agent.analyses WHERE footprint_area_ha > 0") == [(11,)]
 
 
 @pytest.mark.parametrize(
@@ -105,6 +106,7 @@ def test_can_read_the_views(agent_conn):
         "SELECT * FROM public.jobs LIMIT 1",
         "SELECT * FROM public.alert_features LIMIT 1",
         "SELECT * FROM public.alert_feature_stats LIMIT 1",
+        "SELECT * FROM public.index_value_bins LIMIT 1",
         "SELECT * FROM public.geometry_columns LIMIT 1",
         "SELECT * FROM public.geography_columns LIMIT 1",
         "SELECT pg_read_file('/etc/hostname')",
@@ -136,6 +138,7 @@ def test_writes_fail_in_the_default_read_only_transaction(agent_conn, sql):
     "sql",
     [
         "DELETE FROM public.jobs",
+        "DELETE FROM public.index_value_bins",
         "DELETE FROM agent.analyses",
         "UPDATE agent.analyses SET algorithm = 'x'",
         "INSERT INTO agent.analyses (algorithm) VALUES ('x')",
@@ -185,6 +188,9 @@ def test_schema_doc_comes_from_the_catalog(executor):
     assert "agent.analyses: One row per satellite analysis job" in text
     assert "severity_label (text): Severity name. Values: 'watch', 'suspect', 'alert'" in text
     assert "footprint (geometry(Polygon,4326))" in text
+    assert "agent.index_value_distribution: How the index values of completed ndvi, ndwi and mndwi" in text
+    assert "): Index of the analysis. Values: 'ndvi', 'ndwi', 'mndwi'." in text
+    assert "always return the threshold used as a column" in text
 
 
 def test_executor_never_returns_geometry(executor):
@@ -218,7 +224,7 @@ def test_executor_permission_error(executor):
     [
         ("SELECT total_area_ha FROM agent.analysis_severity_summary "
          "WHERE analysis_id = '00000000-0000-4000-a000-000000000002' AND severity_label = 'alert' LIMIT 1", [[12.0]]),
-        ("SELECT count(*) FROM agent.analyses WHERE status = 'completed' LIMIT 1", [[4]]),
+        ("SELECT count(*) FROM agent.analyses WHERE status = 'completed' LIMIT 1", [[9]]),
         ("SELECT quadrant_label, area_ha FROM agent.alert_areas WHERE algorithm = 'lisa' AND severity = 3 LIMIT 5",
          [["HL", 6.0]]),
         ("SELECT window_days, processing_seconds FROM agent.analyses "

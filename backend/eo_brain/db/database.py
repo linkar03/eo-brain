@@ -4,12 +4,12 @@ import os
 import logging
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Optional, List
+from typing import Any, Optional, List, Sequence
 from uuid import UUID
 
 import psycopg2
 from psycopg2.pool import ThreadedConnectionPool
-from psycopg2.extras import RealDictCursor, Json
+from psycopg2.extras import RealDictCursor, Json, execute_values
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -150,8 +150,17 @@ class JobRepository:
         cog_path: str,
         output_crs: str,
         message: Optional[str] = None,
+        value_bins: Optional[Sequence[Any]] = None,
     ):
-        """Mark the job completed; ``message`` replaces the last progress message."""
+        """
+        Mark the job completed; ``message`` replaces the last progress message.
+
+        ``value_bins`` (core.distribution.ValueBin, continuous indices only) are
+        written to index_value_bins in the same transaction, replacing any the
+        job had. If that write fails (for example a database created before the
+        table existed), it is rolled back on its own and logged: the job still
+        completes, with no distribution recorded.
+        """
         sql = """
             UPDATE jobs
             SET status = 'completed', progress = 100, result = %s,
@@ -161,7 +170,30 @@ class JobRepository:
         """
         with get_connection() as conn:
             with conn.cursor() as cur:
+                if value_bins is not None:
+                    self._write_value_bins(cur, job_id, value_bins)
                 cur.execute(sql, (Json(result), cog_path, output_crs, message, str(job_id)))
+
+    @staticmethod
+    def _write_value_bins(cur, job_id: UUID, value_bins: Sequence[Any]) -> None:
+        rows = [
+            (str(job_id), b.bin_index, b.value_from, b.value_to, b.pixel_count, b.area_m2)
+            for b in value_bins
+        ]
+        cur.execute("SAVEPOINT value_bins")
+        try:
+            cur.execute("DELETE FROM index_value_bins WHERE job_id = %s", (str(job_id),))
+            if rows:
+                execute_values(
+                    cur,
+                    "INSERT INTO index_value_bins "
+                    "(job_id, bin_index, value_from, value_to, pixel_count, area_m2) VALUES %s",
+                    rows,
+                )
+            cur.execute("RELEASE SAVEPOINT value_bins")
+        except psycopg2.Error as e:
+            cur.execute("ROLLBACK TO SAVEPOINT value_bins")
+            logger.warning(f"Job {job_id}: value distribution not stored: {str(e).strip()}")
 
     def fail(self, job_id: UUID, message: str):
         sql = """

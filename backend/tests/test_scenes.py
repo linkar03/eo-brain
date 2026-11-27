@@ -277,7 +277,7 @@ def test_seed_messages_are_what_the_pipeline_would_write():
     """The synthetic seed's completed jobs carry the message completion_message() gives their coverage."""
     rows = re.findall(r"   100,\n   '((?:[^']|'')*)',\n   '[^']*', '[^']*',\n   '(\{\"coverage\": [^']*)'\)",
                       SEED.read_text(encoding="utf-8"))
-    assert len(rows) == 4
+    assert len(rows) == 9
     for message, result in rows:
         assert message.replace("''", "'") == completion_message(json.loads(result)["coverage"])
     assert sum(json.loads(r)["coverage"]["low_coverage"] for _, r in rows) == 1

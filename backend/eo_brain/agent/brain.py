@@ -252,9 +252,11 @@ TOOL_SPECS: List[ToolSpec] = [
         name="query_database",
         description=(
             "Answer a question about analyses that ALREADY exist (past jobs, their status, "
-            "alert areas, hectares by severity, overlaps, comparisons) with a read-only "
-            "database query. Pass the user's question, self-contained, in the user's "
-            "language. Never use it to start a new analysis."
+            "alert areas, hectares by severity, overlaps, comparisons, how much area of an "
+            "NDVI / NDWI / MNDWI result is above or below a value: how much green, how much "
+            "water) with a read-only database query. Pass the user's question, self-contained, "
+            "in the user's language, with any threshold the user gave. Never use it to start a "
+            "new analysis."
         ),
         parameters={
             "type": "object",
@@ -280,7 +282,8 @@ CAPABILITIES:
 - LISA: Spatial anomaly detection (outlier clusters in vegetation)
 - Flood: Flood extent mapping with severity classification
 - Stored results: answer questions about analyses already run (status, alert areas, \
-  hectares per severity, overlaps, comparisons) with query_database
+  hectares per severity, overlaps, comparisons; for NDVI, NDWI and MNDWI, how much area lies \
+  above or below an index value, e.g. how much green or how much water) with query_database
 
 RULES:
 1. When the user asks to analyze an area with one of the analyses above, ALWAYS call \
@@ -326,6 +329,10 @@ RULES:
    analyses, query_database, and explain with what they return (coverage, its reason, scenes, \
    dates). If the results do not explain it, say the data does not tell; never offer causes \
    they do not state (satellite orbits, terrain, sensor faults, processing errors).
+14. An area or share that depends on an index threshold (how much green, how much water) is \
+   stated with that threshold, from the threshold column of the rows; if the user named none, \
+   say it is the app's default (NDVI 0.65 for dense green vegetation, 0 for water with NDWI or \
+   MNDWI). A NULL area is not zero: say the stored rows give no figure for it.
 """
 
 

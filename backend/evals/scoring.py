@@ -126,6 +126,8 @@ def effective_args(call) -> Dict[str, Any]:
         eff["location"] = result.get("location") if job else None
     if call.name == "get_job_status":
         eff["job_id"] = str(args.get("job_id", "")).strip().lower()
+    if call.name == "query_database":
+        eff["question"] = args.get("question")
     return eff
 
 
@@ -248,8 +250,12 @@ def score_case(case: Dict[str, Any], agent_result, note: str = "") -> CaseResult
         for name, constraint in (expect.get("args") or {}).items()
     }
     args_ok = tool_ok and all(checks.values())
-    needs_job = expect.get("job_created", any(t in JOB_TOOLS for t in tools))
-    job_ok = job_created if needs_job else True
+    if "job_created" in expect:
+        # The case states it: the scored turn must (true) or must not (false) create a job.
+        job_ok = job_created == bool(expect["job_created"])
+    else:
+        # A job-creating tool must have created its job; other tools set no rule.
+        job_ok = job_created if any(t in JOB_TOOLS for t in tools) else True
     return CaseResult(
         expected_tool=expected_tool, effective_args=eff, arg_checks=checks,
         tool_ok=tool_ok, args_ok=args_ok, refused_ok=None,

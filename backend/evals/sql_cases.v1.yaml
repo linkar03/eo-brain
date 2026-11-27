@@ -213,6 +213,190 @@ cases:
           FROM agent.analyses WHERE algorithm = 'ndvi' AND status = 'completed'
           ORDER BY created_at DESC LIMIT 1
 
+  # Index value distribution: area above / below / between thresholds of a continuous
+  # index (agent.index_value_distribution). The threshold is returned as a column (data
+  # agent rule 9), so it is part of the gold result. Seed intervals sit on the edges that
+  # matter: 0.64 / 0.65 (ndvi 007), 0.49 / 0.50 (ndvi 007, 008), -0.01 / 0.00 (ndwi 009).
+  - id: en-sql-ndvi-area-at-least-threshold
+    lang: en
+    tags: [distribution, threshold]
+    question: "In the June 2025 NDVI analysis of Sample Plain, how many hectares have an NDVI of at least 0.4?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT 0.4 AS threshold, sum(d.area_ha) FROM agent.index_value_distribution d
+        JOIN agent.analyses a ON a.analysis_id = d.analysis_id
+        WHERE a.algorithm = 'ndvi' AND a.location_name ILIKE '%sample plain%'
+          AND a.window_start < '2025-07-01' AND a.window_end > '2025-06-01'
+          AND d.value_from >= 0.4
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT 0.40 AS threshold, sum(area_ha) AS hectares FROM agent.index_value_distribution
+          WHERE value_from >= 0.40 AND analysis_id = (
+            SELECT analysis_id FROM agent.analyses
+            WHERE algorithm = 'ndvi' AND location_name ILIKE '%sample plain%'
+              AND window_start >= '2025-05-31' AND window_end <= '2025-07-02'
+            ORDER BY created_at DESC LIMIT 1)
+          LIMIT 1
+
+  - id: it-sql-verde-soglia-predefinita
+    lang: it
+    tags: [distribution, default-threshold]
+    question: "Quanti ettari di verde ci sono nell'ultima analisi NDVI di Sample Plain?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT 0.65 AS threshold, sum(area_ha) FROM agent.index_value_distribution
+        WHERE value_from >= 0.65 AND analysis_id = (
+          SELECT analysis_id FROM agent.analyses
+          WHERE algorithm = 'ndvi' AND location_name ILIKE '%sample plain%'
+          ORDER BY created_at DESC LIMIT 1)
+        LIMIT 1
+    scripted:
+      - sql: >-
+          WITH ultima AS (
+            SELECT analysis_id FROM agent.analyses
+            WHERE algorithm = 'ndvi' AND location_name ILIKE '%sample plain%' AND status = 'completed'
+            ORDER BY created_at DESC LIMIT 1)
+          SELECT 0.65 AS soglia, sum(d.area_ha) AS ettari_verdi
+          FROM agent.index_value_distribution d JOIN ultima u ON u.analysis_id = d.analysis_id
+          WHERE d.value_from >= 0.65
+          LIMIT 1
+
+  - id: it-sql-acqua-ultima-ndwi
+    lang: it
+    tags: [distribution, default-threshold, water]
+    question: "Quanta acqua c'è nell'ultima analisi NDWI, in ettari?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT 0 AS threshold, sum(area_ha) FROM agent.index_value_distribution
+        WHERE value_from >= 0 AND analysis_id = (
+          SELECT analysis_id FROM agent.analyses WHERE algorithm = 'ndwi'
+          ORDER BY created_at DESC LIMIT 1)
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT 0.0 AS soglia, sum(area_ha) FILTER (WHERE value_from >= 0) AS ettari_acqua
+          FROM agent.index_value_distribution
+          WHERE analysis_id = (SELECT analysis_id FROM agent.analyses WHERE algorithm = 'ndwi'
+                               ORDER BY created_at DESC LIMIT 1)
+          LIMIT 1
+
+  - id: en-sql-mndwi-water-share
+    lang: en
+    tags: [distribution, default-threshold, water, share]
+    question: "What share of the covered area is water in the latest MNDWI analysis?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT 0 AS threshold, sum(pct_of_covered_area) FROM agent.index_value_distribution
+        WHERE value_from >= 0 AND analysis_id = (
+          SELECT analysis_id FROM agent.analyses WHERE algorithm = 'mndwi'
+          ORDER BY created_at DESC LIMIT 1)
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT 0 AS threshold,
+                 sum(CASE WHEN value_from >= 0 THEN pct_of_covered_area ELSE 0 END) AS water_pct
+          FROM agent.index_value_distribution
+          WHERE analysis_id = (SELECT analysis_id FROM agent.analyses WHERE algorithm = 'mndwi'
+                               ORDER BY created_at DESC LIMIT 1)
+          LIMIT 1
+
+  - id: it-sql-ndvi-intervallo
+    lang: it
+    tags: [distribution, range]
+    question: "Quanti ettari dell'ultima analisi NDVI di Sample Plain hanno un NDVI tra 0,2 e 0,5?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT 0.2 AS threshold_from, 0.5 AS threshold_to, sum(area_ha)
+        FROM agent.index_value_distribution
+        WHERE value_from >= 0.2 AND value_to <= 0.5 AND analysis_id = (
+          SELECT analysis_id FROM agent.analyses
+          WHERE algorithm = 'ndvi' AND location_name ILIKE '%sample plain%'
+          ORDER BY created_at DESC LIMIT 1)
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT 0.2 AS da, 0.5 AS a, sum(area_ha) AS ettari FROM agent.index_value_distribution
+          WHERE value_from BETWEEN 0.2 AND 0.49 AND analysis_id = (
+            SELECT analysis_id FROM agent.analyses
+            WHERE algorithm = 'ndvi' AND location_name ILIKE '%sample plain%'
+            ORDER BY created_at DESC LIMIT 1)
+          LIMIT 1
+
+  - id: it-sql-confronto-verde-giugno-dicembre
+    lang: it
+    tags: [distribution, comparison]
+    question: "Confronta l'area con NDVI almeno 0,65 delle analisi NDVI di Sample Plain di giugno e di dicembre 2025"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT a.analysis_id, 0.65 AS threshold, sum(d.area_ha)
+        FROM agent.analyses a JOIN agent.index_value_distribution d ON d.analysis_id = a.analysis_id
+        WHERE a.algorithm = 'ndvi' AND a.location_name ILIKE '%sample plain%' AND d.value_from >= 0.65
+        GROUP BY a.analysis_id
+        LIMIT 10
+    scripted:
+      - sql: >-
+          SELECT analysis_id, 0.65 AS soglia, sum(area_ha) AS ettari
+          FROM agent.index_value_distribution
+          WHERE algorithm = 'ndvi' AND location_name ILIKE '%sample plain%' AND value_from >= 0.65
+          GROUP BY analysis_id
+          LIMIT 10
+
+  # No distribution recorded (011 ran before it was): the area is unknown, not zero.
+  # The gold result is (0, NULL); an answer of 0 hectares fails.
+  - id: en-sql-water-no-distribution
+    lang: en
+    tags: [distribution, water, missing]
+    question: "How much water, in hectares, is there in the NDWI analysis of Old Harbour?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT 0 AS threshold, sum(area_ha) FROM agent.index_value_distribution
+        WHERE location_name ILIKE '%old harbour%' AND algorithm = 'ndwi' AND value_from >= 0
+        LIMIT 1
+    scripted:
+      - sql: >-
+          SELECT 0 AS threshold, sum(CASE WHEN value_from >= 0 THEN area_ha ELSE 0 END) AS water_ha
+          FROM agent.index_value_distribution
+          WHERE analysis_id = (SELECT analysis_id FROM agent.analyses
+                               WHERE algorithm = 'ndwi' AND location_name ILIKE '%old harbour%'
+                               ORDER BY created_at DESC LIMIT 1)
+          LIMIT 1
+
+  # Low coverage (004 covers 41.5 %): the area describes only the covered part, so the
+  # answer carries coverage_pct with it.
+  - id: en-sql-green-low-coverage
+    lang: en
+    tags: [distribution, default-threshold, coverage]
+    question: "How many hectares of dense green vegetation are in the latest NDVI analysis, and how much of the area did it cover?"
+    expect:
+      type: sql_result
+      gold_sql: >-
+        SELECT 0.65 AS threshold, sum(d.area_ha), a.coverage_pct
+        FROM agent.analyses a JOIN agent.index_value_distribution d ON d.analysis_id = a.analysis_id
+        WHERE d.value_from >= 0.65 AND a.analysis_id = (
+          SELECT analysis_id FROM agent.analyses WHERE algorithm = 'ndvi'
+          ORDER BY created_at DESC LIMIT 1)
+        GROUP BY a.coverage_pct
+        LIMIT 1
+    scripted:
+      - sql: >-
+          WITH latest AS (
+            SELECT analysis_id, coverage_pct FROM agent.analyses WHERE algorithm = 'ndvi'
+            ORDER BY created_at DESC LIMIT 1)
+          SELECT 0.65 AS threshold,
+                 (SELECT sum(d.area_ha) FROM agent.index_value_distribution d
+                  WHERE d.analysis_id = l.analysis_id AND d.value_from >= 0.65) AS green_ha,
+                 l.coverage_pct
+          FROM latest l
+          LIMIT 1
+
   # ---------------------------------------------------------------- adversarial
   - id: en-block-delete
     lang: en

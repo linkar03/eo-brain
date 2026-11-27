@@ -13,8 +13,10 @@ what the view can produce:
   * the job_status enum in the database (status);
   * the Python constants the writers use: the algorithm registry (jobs are created only
     with its keys, by the agent and by POST /analyze), Severity and MoranQuadrant
-    (eo_brain.algorithms.base), and DISCRETE_OUTPUT_ALGORITHMS (eo_brain/api/main.py,
-    the algorithms whose results are vectorised into alert polygons).
+    (eo_brain.algorithms.base), DISCRETE_OUTPUT_ALGORITHMS (eo_brain/api/main.py,
+    the algorithms whose results are vectorised into alert polygons) and
+    CONTINUOUS_OUTPUT_ALGORITHMS (the same file, the indices whose value intervals
+    are stored in index_value_bins).
 
 The view's CASE mappings are themselves a copy of Severity / MoranQuadrant / the
 registry, so the first test pins those copies to the Python constants.
@@ -46,7 +48,7 @@ pytestmark = [
     pytest.mark.skipif(not ADMIN_URL, reason="TEST_DATABASE_URL not set (PostGIS superuser URL)"),
 ]
 
-VIEWS = ("analyses", "alert_areas", "analysis_severity_summary")
+VIEWS = ("analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution")
 API_MAIN = Path(eo_brain.__file__).resolve().parent / "api" / "main.py"
 
 _TOKEN = r"(?:'[^']*'|-?\d+)"
@@ -75,19 +77,25 @@ def problems(comment: str, expected: Set[Any]) -> List[str]:
     return out
 
 
-def discrete_output_algorithms() -> Set[str]:
+def _main_constant(name: str) -> Set[str]:
     """
-    DISCRETE_OUTPUT_ALGORITHMS from eo_brain/api/main.py, read with ast instead of an
-    import: the API module needs the full raster stack, which CI does not install.
-    Fails loudly if the constant stops being a literal assignment there.
+    A set constant of eo_brain/api/main.py, read with ast instead of an import: the
+    API module needs the full raster stack, which CI does not install. Fails loudly
+    if the constant stops being a literal assignment there.
     """
     tree = ast.parse(API_MAIN.read_text(encoding="utf-8-sig"))  # main.py starts with a BOM
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "DISCRETE_OUTPUT_ALGORITHMS" for t in node.targets
-        ):
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             return set(ast.literal_eval(node.value))
-    raise AssertionError(f"DISCRETE_OUTPUT_ALGORITHMS is no longer a literal in {API_MAIN}")
+    raise AssertionError(f"{name} is no longer a literal in {API_MAIN}")
+
+
+def discrete_output_algorithms() -> Set[str]:
+    return _main_constant("DISCRETE_OUTPUT_ALGORITHMS")
+
+
+def continuous_output_algorithms() -> Set[str]:
+    return _main_constant("CONTINUOUS_OUTPUT_ALGORITHMS")
 
 
 def _literal(node) -> Any:
@@ -180,6 +188,7 @@ def expected(conn, mappings) -> Dict[tuple, Set[Any]]:
         ("analysis_severity_summary", "algorithm"): alert_algorithms,
         ("analysis_severity_summary", "severity"): set(severity),
         ("analysis_severity_summary", "severity_label"): set(severity.values()),
+        ("index_value_distribution", "algorithm"): continuous_output_algorithms(),
     }
 
 
@@ -194,6 +203,8 @@ def test_view_case_mappings_match_the_python_constants(mappings):
     assert mappings["alert_areas"]["quadrant_label"] == quadrant
     assert mappings["analysis_severity_summary"]["severity_label"] == severity
     assert discrete_output_algorithms() <= set(ALGORITHMS)
+    assert continuous_output_algorithms() <= set(ALGORITHMS)
+    assert not continuous_output_algorithms() & discrete_output_algorithms()
 
 
 def test_every_closed_set_column_lists_exactly_its_values(comments, expected):
@@ -240,6 +251,11 @@ def test_coverage_columns_read_the_seeded_results(conn):
         ("004", 41.5, True, 58.5, 9, 2, 1, "2026-01-09"),
         ("005", None, None, None, None, None, None, None),
         ("006", None, None, None, None, None, None, None),
+        ("007", 99.4, False, 0.6, 12, 3, 3, "2025-06-04"),
+        ("008", 96.3, False, 3.7, 12, 4, 4, "2025-12-03"),
+        ("009", 97.1, False, 2.9, 24, 4, 4, "2025-11-21"),
+        ("010", 88.2, False, 11.8, 24, 3, 3, "2025-11-21"),
+        ("011", 93.4, False, 4.1, 26, 5, 5, "2025-11-14"),
     ]
 
 

@@ -40,6 +40,7 @@ from eo_brain.core.coverage import (
     completion_message, coverage_layer, inside_bbox_mask, no_data_message,
     summarize_coverage, usable_pixels_per_slice,
 )
+from eo_brain.core.distribution import crs_in_metres, grid_pixel_area_m2, index_distribution
 from eo_brain.algorithms.base import get_algorithm, ALGORITHMS
 from eo_brain.db.database import job_repo, get_connection, close_pool
 from eo_brain.api.tiles import router as tiles_router, tile_query_for_algorithm
@@ -295,6 +296,27 @@ def _calculate_stats_from_cog(cog_path: str) -> Dict[str, Any]:
         return {}
 
 
+def _value_distribution(job_id: UUID, algorithm: str, layer, inside, crs: str, coverage: Dict[str, Any]):
+    """
+    ``(bins, block)`` for a continuous index: its 0.01-wide value intervals
+    (stored in index_value_bins with the job) and ``result.value_distribution``
+    (min / max / mean), over the pixels ``coverage`` counts as covered
+    (core.distribution). Plain numpy on the already computed layer: no Dask.
+    A failure is logged and recorded in the block; it never fails the job.
+    """
+    try:
+        if not crs_in_metres(crs):
+            raise ValueError(f"the result grid's CRS {crs} is not projected in metres")
+        dist = index_distribution(
+            algorithm, layer.values, inside,
+            grid_pixel_area_m2(layer["x"].values, layer["y"].values), coverage["covered_px"],
+        )
+    except Exception as e:
+        logger.warning(f"Job {job_id}: value distribution not recorded (non-fatal): {e}")
+        return None, {"error": str(e)}
+    return dist.bins, dist.summary()
+
+
 # --- Analysis Pipeline ---
 
 def _optimal_chunks(resolution_m: int) -> dict:
@@ -409,6 +431,14 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
             raise DataNotFoundError(no_data_message(selection.to_dict()))
         logger.info(f"Job {job_id}: coverage {coverage['coverage_pct']}% of the requested area")
 
+        # Continuous indices: how their values are spread over the same covered
+        # pixels (stored with the completion below). Discrete outputs get none.
+        value_bins, value_distribution = None, None
+        if request.algorithm in CONTINUOUS_OUTPUT_ALGORITHMS:
+            value_bins, value_distribution = _value_distribution(
+                job_id, request.algorithm, layer, inside, load_result.crs, coverage
+            )
+
         job_repo.update_progress(job_id, 65, "Generating map tiles...")
 
         try:
@@ -483,9 +513,11 @@ def _run_analysis_sync(job_id: UUID, request: AnalysisRequest, provider_name: st
                 "tile_url": tile_url, "vector_url": vector_url,
                 "vector_stats": vector_stats, "coverage": coverage,
                 "radiometry": load_result.radiometry_summary(refused),
+                "value_distribution": value_distribution,
             },
             cog_path=cog_path, output_crs=load_result.crs,
             message=" ".join(filter(None, [completion_message(coverage), refused_note(refused)])),
+            value_bins=value_bins,
         )
         logger.info(f"Job {job_id} completed successfully")
 

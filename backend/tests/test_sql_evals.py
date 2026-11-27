@@ -24,7 +24,7 @@ from evals.sql_suite import (
 )
 
 ADMIN_URL = os.environ.get("TEST_DATABASE_URL", "").strip()
-VIEWS = ["analyses", "alert_areas", "analysis_severity_summary"]
+VIEWS = ["analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution"]
 
 
 @pytest.fixture(scope="module")
@@ -49,6 +49,30 @@ def test_every_gold_sql_passes_the_gate(dataset):
         if case["expect"]["type"] == "sql_result":
             decision = gate.check(case["expect"]["gold_sql"])
             assert decision.ok, (case["id"], decision.reason)
+
+
+def test_every_scripted_answer_passes_the_gate(dataset):
+    """The last scripted SQL of a text-to-SQL case is the answer the scripted run scores."""
+    gate = SQLGate(VIEWS, max_limit=100)
+    for case in dataset["cases"]:
+        if case["expect"]["type"] == "sql_result":
+            last = [t["sql"] for t in case["scripted"] if "sql" in t][-1]
+            decision = gate.check(last)
+            assert decision.ok, (case["id"], decision.reason)
+
+
+def test_dataset_covers_the_value_distribution_questions(dataset):
+    """Threshold questions: explicit, default, water, share, range, comparison, no data, low coverage."""
+    cases = [c for c in dataset["cases"] if "distribution" in c.get("tags", [])]
+    tags = {t for c in cases for t in c["tags"]}
+    assert {"threshold", "default-threshold", "water", "share", "range", "comparison", "missing",
+            "coverage"} <= tags
+    assert {c["lang"] for c in cases} == {"it", "en"}
+    for case in cases:
+        gold = case["expect"]["gold_sql"]
+        assert "agent.index_value_distribution" in gold, case["id"]
+        # the threshold is part of the answer (data agent rule 9)
+        assert " AS threshold" in gold, case["id"]
 
 
 def test_adversarial_scripts_are_rejected_by_the_gate_except_marked_safe_answers(dataset):
@@ -317,6 +341,15 @@ def test_scripted_sql_suite_passes_and_a_wrong_answer_is_caught(dataset):
     # Plausible but wrong: oldest flood instead of latest (8 ha, not 12 ha).
     wrong["scripted"] = [{"sql": wrong["scripted"][0]["sql"].replace("DESC", "ASC")}]
     cases.append(wrong)
+    # Plausible but wrong: no distribution was recorded for Old Harbour, and the CASE form
+    # through a LEFT JOIN from agent.analyses turns that unknown area into 0 hectares.
+    zero = copy.deepcopy(next(c for c in cases if c["id"] == "en-sql-water-no-distribution"))
+    zero["id"] = "missing-as-zero-control"
+    zero["scripted"] = [{"sql": (
+        "SELECT 0 AS threshold, sum(CASE WHEN d.value_from >= 0 THEN d.area_ha ELSE 0 END) AS water_ha "
+        "FROM agent.analyses a LEFT JOIN agent.index_value_distribution d ON d.analysis_id = a.analysis_id "
+        "WHERE a.algorithm = 'ndwi' AND a.location_name ILIKE '%old harbour%' LIMIT 1")}]
+    cases.append(zero)
 
     db = create_scratch_db(ADMIN_URL, prefix="agent_test_eval")
     try:
@@ -332,6 +365,9 @@ def test_scripted_sql_suite_passes_and_a_wrong_answer_is_caught(dataset):
     control = by_id.pop("wrong-answer-control")
     assert control.status == "ok" and control.rows == [[8.0]] and control.gold_rows == [[12.0]]
     assert not control.passed and control.outcome == "fail"
+    as_zero = by_id.pop("missing-as-zero-control")
+    assert as_zero.status == "ok" and as_zero.rows == [[0, 0.0]] and as_zero.gold_rows == [[0, None]]
+    assert not as_zero.passed
     assert all(r.outcome == "pass" for r in by_id.values())
     failed = [r.id for r in by_id.values() if not r.passed]
     assert failed == []

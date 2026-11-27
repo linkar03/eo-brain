@@ -7,7 +7,7 @@ import pytest
 
 from eo_brain.agent.sql_gate import ALLOWED_FUNCTIONS, MAX_SQL_CHARS, SQLGate
 
-VIEWS = ["analyses", "alert_areas", "analysis_severity_summary"]
+VIEWS = ["analyses", "alert_areas", "analysis_severity_summary", "index_value_distribution"]
 
 
 @pytest.fixture(scope="module")
@@ -74,6 +74,75 @@ def test_accepted(gate, sql):
     d = gate.check(sql)
     assert d.ok, d.reason
     assert not d.sql.endswith(";")
+
+
+# ---------------------------------------------------------------- index value distribution
+#
+# The shapes the data agent needs for "how much green / water": the threshold as a
+# numeric literal in the select list (it must reach the user with the figure), SUM
+# of the areas, and comparisons of the numeric interval edges. Nothing here needed
+# a change to the gate; the rejections below show it was not widened.
+
+DISTRIBUTION_ACCEPTED = [
+    # area at or above an explicit / default threshold, latest analysis of a kind
+    "SELECT 0.65 AS threshold, SUM(area_ha) AS green_ha FROM agent.index_value_distribution "
+    "WHERE value_from >= 0.65 AND analysis_id = (SELECT analysis_id FROM agent.analyses "
+    "WHERE algorithm = 'ndvi' AND status = 'completed' ORDER BY created_at DESC LIMIT 1) LIMIT 1",
+    # water with the zero threshold, also written as a decimal and as a cast
+    "SELECT 0 AS threshold, SUM(area_km2) FROM agent.index_value_distribution "
+    "WHERE algorithm = 'ndwi' AND value_from >= 0 LIMIT 1",
+    "SELECT 0.0::numeric AS threshold, round(SUM(area_ha)::numeric, 1) FROM agent.index_value_distribution "
+    "WHERE value_from >= 0.0 LIMIT 1",
+    # below a negative threshold, and a range written two ways
+    "SELECT -0.1 AS threshold, SUM(area_ha) FROM agent.index_value_distribution WHERE value_to <= -0.1 LIMIT 1",
+    "SELECT 0.2 AS threshold_from, 0.5 AS threshold_to, SUM(area_ha), SUM(pct_of_covered_area) "
+    "FROM agent.index_value_distribution WHERE value_from >= 0.2 AND value_to <= 0.5 LIMIT 1",
+    "SELECT SUM(area_ha) FROM agent.index_value_distribution WHERE value_from BETWEEN 0.2 AND 0.49 LIMIT 1",
+    # the sum over all intervals that tells "no pixel reached t" (0) from "no distribution" (NULL)
+    "SELECT 0.65 AS threshold, SUM(CASE WHEN value_from >= 0.65 THEN area_ha ELSE 0 END) "
+    "FROM agent.index_value_distribution WHERE analysis_id = '00000000-0000-4000-a000-000000000008' LIMIT 1",
+    "SELECT SUM(area_ha) FILTER (WHERE value_from >= 0.65) AS green_ha, count(*) AS intervals "
+    "FROM agent.index_value_distribution WHERE analysis_id = '00000000-0000-4000-a000-000000000008' LIMIT 1",
+    # two analyses of one place side by side, with coverage, from a LEFT JOIN on the analyses
+    "SELECT a.analysis_id, a.window_start, a.coverage_pct, 0.65 AS threshold, SUM(d.area_ha) AS green_ha "
+    "FROM agent.analyses a LEFT JOIN agent.index_value_distribution d "
+    "ON d.analysis_id = a.analysis_id AND d.value_from >= 0.65 "
+    "WHERE a.algorithm = 'ndvi' AND a.location_name ILIKE '%sample plain%' "
+    "GROUP BY a.analysis_id, a.window_start, a.coverage_pct ORDER BY a.window_start LIMIT 10",
+    "WITH g AS (SELECT analysis_id, SUM(area_ha) AS ha FROM agent.index_value_distribution "
+    "WHERE value_from >= 0.65 GROUP BY analysis_id) SELECT g.analysis_id, g.ha, "
+    "g.ha - lag(g.ha) OVER (ORDER BY a.window_start) AS change_ha FROM g "
+    "JOIN agent.analyses a ON a.analysis_id = g.analysis_id LIMIT 10",
+    "SELECT value_from, value_to, area_ha FROM agent.index_value_distribution "
+    "WHERE analysis_id = '00000000-0000-4000-a000-000000000009' ORDER BY value_from DESC LIMIT 100",
+    "SELECT value_mean, value_min, value_max, coverage_pct FROM agent.analyses WHERE algorithm = 'mndwi' LIMIT 5",
+]
+
+
+@pytest.mark.parametrize("sql", DISTRIBUTION_ACCEPTED)
+def test_distribution_query_shapes_are_accepted(gate, sql):
+    d = gate.check(sql)
+    assert d.ok, d.reason
+
+
+@pytest.mark.parametrize(
+    "sql,fragment",
+    [
+        ("SELECT SUM(area_ha) FROM public.index_value_bins LIMIT 1", "not allowed"),
+        ("SELECT SUM(area_m2) FROM index_value_bins LIMIT 1", "not allowed"),
+        ("SELECT SUM(area_ha) FROM index_value_distribution LIMIT 1", "agent.index_value_distribution"),
+        ("SELECT 0.65::text AS threshold FROM agent.index_value_distribution LIMIT 1", "cast"),
+        ("SELECT 'NDVI >= ' || 0.65 FROM agent.index_value_distribution LIMIT 1", "concatenation"),
+        ("SELECT 0.65 AS threshold, SUM(area_ha) FROM agent.index_value_distribution "
+         "WHERE value_from >= 0.65", "needs LIMIT"),
+        ("SELECT width_bucket(value_from, -1, 1, 20), SUM(area_ha) FROM agent.index_value_distribution "
+         "GROUP BY 1 LIMIT 20", "function not allowed"),
+        ("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY value_from) "
+         "FROM agent.index_value_distribution LIMIT 1", "not allowed"),
+    ],
+)
+def test_distribution_queries_still_meet_every_rule(gate, sql, fragment):
+    rejected(gate, sql, fragment)
 
 
 # ---------------------------------------------------------------- stacked statements

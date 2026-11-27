@@ -18,10 +18,15 @@
 #                              not given); `days_back` is the default 30 when omitted and None
 #                              when the call passes a date; `period` (launch_analysis) is the
 #                              job's date range, "YYYY-MM-DD to YYYY-MM-DD", i.e. what actually
-#                              ran, whichever form the model used (None when no job)
+#                              ran, whichever form the model used (None when no job).
+#                              `question` (query_database) is the question passed to the data agent
 #   expect.reason              why a refusal is expected (informational)
 #   expect.place_choice        refusal only: true = the user must have been asked to choose a
 #                                place (a needs-user result listing candidates)
+#   expect.job_created         tool_call only, optional: true = the scored turn must have created
+#                                a job, false = it must not have (a question about stored
+#                                results). Without it, an expected job-creating tool must have
+#                                created its job, and any other tool sets no rule on jobs
 #   scripted                   canned model output for --provider scripted ONLY:
 #                                {calls: [{tool, args}]} or {text: "..."}, or
 #                                {turns: [{calls: ...}, {calls: ...}]} for several model
@@ -714,6 +719,35 @@ cases:
     input: "Did any of my analyses fail? Why?"
     expect: {type: tool_call, tool: query_database}
     scripted: {calls: [{tool: query_database, args: {question: "Which analyses failed and why?"}}]}
+
+  # How much area of a stored NDVI / NDWI / MNDWI result lies above a value is read from the
+  # stored value distribution: a question, not a new analysis. A threshold the user gave must
+  # reach the data agent (`question` is the text passed to query_database).
+  - id: it-route-query-quanto-verde
+    lang: it
+    tags: [routing, query, distribution]
+    input: "Quanto verde c'è nell'ultima analisi?"
+    expect: {type: tool_call, tool: query_database, job_created: false}
+    scripted: {calls: [{tool: query_database, args: {question: "Quanto verde c'è nell'ultima analisi NDVI?"}}]}
+
+  - id: en-route-query-how-much-water
+    lang: en
+    tags: [routing, query, distribution]
+    input: "How much water is there in the latest analysis?"
+    expect: {type: tool_call, tool: query_database, job_created: false}
+    scripted: {calls: [{tool: query_database, args: {question: "How much water is there in the latest NDWI or MNDWI analysis?"}}]}
+
+  - id: it-route-query-ettari-sopra-soglia
+    lang: it
+    tags: [routing, query, distribution]
+    input: "Quanti ettari dell'ultima analisi NDVI hanno un valore sopra 0,5?"
+    expect:
+      type: tool_call
+      tool: query_database
+      job_created: false
+      args:
+        question: {matches: ["0.5", "0.50"]}
+    scripted: {calls: [{tool: query_database, args: {question: "Quanti ettari dell'ultima analisi NDVI hanno NDVI sopra 0,5?"}}]}
 
   - id: en-route-launch-not-query
     lang: en
