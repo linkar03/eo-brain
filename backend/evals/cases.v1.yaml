@@ -13,7 +13,12 @@
 #   expect.args                constraints on effective arguments:
 #                                equals | any_of | range [lo, hi] | matches [phrases]
 #                              `location` is what the model passed; `place` (launch_analysis)
-#                              is the place the job was created for, as the geocoder names it
+#                              is the place the job was created for, as the geocoder names it.
+#                              `start_date` / `end_date` are the dates the model passed (None if
+#                              not given); `days_back` is the default 30 when omitted and None
+#                              when the call passes a date; `period` (launch_analysis) is the
+#                              job's date range, "YYYY-MM-DD to YYYY-MM-DD", i.e. what actually
+#                              ran, whichever form the model used (None when no job)
 #   expect.reason              why a refusal is expected (informational)
 #   expect.place_choice        refusal only: true = the user must have been asked to choose a
 #                                place (a needs-user result listing candidates)
@@ -34,6 +39,9 @@
 # gazetteer below (an alias appearing in it as whole words), then in `recorded_searches`
 # (real Nominatim responses, matched ignoring case and spacing but not punctuation).
 # Gazetteer boxes are rough, hand-drawn extents: fine for routing/validation, not for analysis.
+#
+# The clock is stubbed in both modes (evals/stubs.py FIXED_NOW): today is 2026-01-15, and the
+# model is told that date. Calendar periods in the cases are written against it.
 
 version: 1
 
@@ -51,6 +59,7 @@ gazetteer:
   - {name: "Delta del Po, Italia", aliases: [delta del po, po delta], bbox: [12.10, 44.75, 12.60, 45.10]}
   - {name: "Sicilia, Italia", aliases: [sicilia, sicily], bbox: [12.37, 36.64, 15.65, 38.32]}
   - {name: "Valencia, Comunitat Valenciana, España", aliases: [valencia], bbox: [-0.43, 39.42, -0.27, 39.57]}
+  - {name: "Fiesole, Toscana, Italia", aliases: [fiesole], bbox: [11.25, 43.78, 11.35, 43.84]}
 
 cases:
   # ---------------------------------------------------------------- compact input
@@ -250,6 +259,146 @@ cases:
         days_back: {equals: 10}
         location: {matches: [naples, napoli]}
     scripted: {calls: [{tool: launch_analysis, args: {location: "Naples", algorithm: "ndvi", days_back: 10}}]}
+
+  # ------------------------------------------------ calendar periods (start_date + end_date)
+  # Named dates, months and years are passed as start_date/end_date, never as a look-back
+  # window. `period` is the job's date range: what ran, whichever form the model used, so
+  # "to today" may also be passed as days_back. Today is 2026-01-15 (the eval clock), so a
+  # month without a year means its last occurrence before that date.
+  - id: en-cal-lisa-fiesole-aug-sep
+    lang: en
+    tags: [temporal, calendar]
+    # Live failure, 2026-11-27 (with "August to September 2026"): launched as days_back=60,
+    # i.e. 2026-09-28 to 2026-11-27, and the reply said only "Temporal Window: 60 days".
+    # The year is moved here so that the period lies before the eval clock.
+    input: "Find spatial outliers in vegetation around Fiesole, August to September 2025"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      args:
+        algorithm: {equals: lisa}
+        place: {matches: [fiesole]}
+        period: {equals: "2025-08-01 to 2025-09-30"}
+    scripted: {calls: [{tool: launch_analysis, args: {location: "Fiesole", algorithm: "lisa", start_date: "2025-08-01", end_date: "2025-09-30"}}]}
+
+  - id: it-cal-ndvi-pisa-giugno-luglio
+    lang: it
+    tags: [temporal, calendar]
+    input: "NDVI a Pisa dal 1 giugno al 15 luglio 2025"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      args:
+        algorithm: {equals: ndvi}
+        place: {matches: [pisa]}
+        period: {equals: "2025-06-01 to 2025-07-15"}
+    scripted: {calls: [{tool: launch_analysis, args: {location: "Pisa", algorithm: "ndvi", start_date: "2025-06-01", end_date: "2025-07-15"}}]}
+
+  - id: en-cal-ndwi-venice-to-today
+    lang: en
+    tags: [temporal, calendar]
+    input: "NDWI for Venice from 1 December 2025 to today"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      args:
+        algorithm: {equals: ndwi}
+        place: {matches: [venezia]}
+        period: {equals: "2025-12-01 to 2026-01-15"}
+    scripted: {calls: [{tool: launch_analysis, args: {location: "Venice", algorithm: "ndwi", start_date: "2025-12-01", end_date: "2026-01-15"}}]}
+
+  - id: it-cal-flood-bologna-dal-20-dicembre
+    lang: it
+    tags: [temporal, calendar]
+    input: "Alluvioni a Bologna dal 20 dicembre a oggi"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      args:
+        algorithm: {equals: flood}
+        place: {matches: [bologna]}
+        period: {equals: "2025-12-20 to 2026-01-15"}
+    scripted: {calls: [{tool: launch_analysis, args: {location: "Bologna", algorithm: "alluvione", start_date: "2025-12-20", end_date: "2026-01-15"}}]}
+
+  - id: en-cal-ndvi-naples-august
+    lang: en
+    tags: [temporal, calendar]
+    input: "NDVI of Naples in August"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      args:
+        algorithm: {equals: ndvi}
+        place: {matches: [napoli]}
+        period: {equals: "2025-08-01 to 2025-08-31"}
+    scripted: {calls: [{tool: launch_analysis, args: {location: "Naples", algorithm: "ndvi", start_date: "2025-08-01", end_date: "2025-08-31"}}]}
+
+  - id: it-cal-vegetazione-firenze-agosto
+    lang: it
+    tags: [temporal, calendar]
+    input: "Vegetazione a Firenze ad agosto"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      args:
+        algorithm: {equals: ndvi}
+        place: {matches: [firenze]}
+        period: {equals: "2025-08-01 to 2025-08-31"}
+    scripted: {calls: [{tool: launch_analysis, args: {location: "Firenze", algorithm: "vegetazione", start_date: "2025-08-01", end_date: "2025-08-31"}}]}
+
+  - id: en-cal-refuse-future-march-2027
+    lang: en
+    tags: [refusal, temporal, calendar]
+    input: "NDVI for Rome in March 2027"
+    expect: {type: refusal, reason: future_period}
+    scripted: {calls: [{tool: launch_analysis, args: {location: "Rome", algorithm: "ndvi", start_date: "2027-03-01", end_date: "2027-03-31"}}]}
+
+  - id: it-cal-refuse-gennaio-2024-dicembre-2025
+    lang: it
+    tags: [refusal, temporal, calendar]
+    input: "NDVI a Milano da gennaio 2024 a dicembre 2025"
+    expect: {type: refusal, reason: out_of_range_window}
+    scripted: {calls: [{tool: launch_analysis, args: {location: "Milano", algorithm: "ndvi", start_date: "2024-01-01", end_date: "2025-12-31"}}]}
+
+  # Guard cases for dates: after a needs-user rejection of a calendar period, a retry in
+  # the look-back form (or with other dates) is a different request and must be refused.
+  - id: it-cal-guard-due-anni-retry-days-back
+    lang: it
+    tags: [refusal, temporal, calendar, guard]
+    input: "Vegetazione a Pisa da gennaio 2024 a dicembre 2025"
+    expect: {type: refusal, reason: out_of_range_window}
+    scripted:
+      turns:
+        - {calls: [{tool: launch_analysis, args: {location: "Pisa", algorithm: "ndvi", start_date: "2024-01-01", end_date: "2025-12-31"}}]}
+        - {calls: [{tool: launch_analysis, args: {location: "Pisa", algorithm: "ndvi", days_back: 365}}]}
+
+  - id: en-cal-guard-future-retry-days-back
+    lang: en
+    tags: [refusal, temporal, calendar, guard]
+    input: "Map the flooding near Valencia, Spain in March 2027"
+    expect: {type: refusal, reason: future_period}
+    scripted:
+      turns:
+        - {calls: [{tool: launch_analysis, args: {location: "Valencia, Spain", algorithm: "flood", start_date: "2027-03-01", end_date: "2027-03-31"}}]}
+        - {calls: [{tool: launch_analysis, args: {location: "Valencia, Spain", algorithm: "flood", days_back: 30}}]}
+
+  # Counter-case: a malformed date is model-fixable, so the corrected retry creates the job.
+  # The scored call is the rejected first one: only what the retry keeps is checked.
+  - id: it-cal-guard-bad-date-corrected
+    lang: it
+    tags: [guard, temporal, calendar]
+    input: "Salute della vegetazione a Napoli a settembre 2025"
+    expect:
+      type: tool_call
+      tool: launch_analysis
+      job_created: true
+      args:
+        start_date: {equals: "2025-09-01"}
+        location: {matches: [napoli, naples]}
+    scripted:
+      turns:
+        - {calls: [{tool: launch_analysis, args: {location: "Napoli", algorithm: "ndvi", start_date: "2025-09-01", end_date: "2025-09-31"}}]}
+        - {calls: [{tool: launch_analysis, args: {location: "Napoli", algorithm: "ndvi", start_date: "2025-09-01", end_date: "2025-09-30"}}]}
 
   # ------------------------------------------------ follow-ups ("same area")
   - id: it-followup-stessa-zona-acqua

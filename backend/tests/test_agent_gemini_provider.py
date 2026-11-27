@@ -81,6 +81,8 @@ def test_request_shape():
     assert launch.type == types.Type.OBJECT
     assert launch.required == ["location", "algorithm"]
     assert launch.properties["days_back"].type == types.Type.INTEGER
+    assert launch.properties["start_date"].type == types.Type.STRING
+    assert launch.properties["end_date"].type == types.Type.STRING
     assert decls["list_capabilities"].parameters.properties == {}
     [content] = req["contents"]
     assert content.role == "user" and content.parts[0].text == "ndvi firenze"

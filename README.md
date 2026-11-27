@@ -36,7 +36,7 @@ follow-up answered by the data agent with its SQL and rows.*
 
 "Right values" is column-subset accuracy. The stricter comparison, the method and what the
 misses are: [Model-quality results](#model-quality-results). The suites have grown since that
-run, to 47 tool cases and 20 SQL cases. CI runs over 850 backend tests and over 110 frontend
+run, to 58 tool cases and 20 SQL cases. CI runs over 850 backend tests and over 110 frontend
 tests on every push.
 
 To run it: [Quickstart](#quickstart-docker-compose). What it does not do yet:
@@ -296,11 +296,13 @@ Code decides everything else.
 | Decided by the model | Decided by code |
 |---|---|
 | Which tool to call | Input sanitisation (control characters stripped, 2000-character cap) |
-| `algorithm`, `location`, `days_back` taken from the text | Algorithm alias resolution (`"alluvione"` becomes `flood`); unknown algorithms are rejected |
+| `algorithm`, `location` and the period (`days_back`, or `start_date` and `end_date`) taken from the text | Algorithm alias resolution (`"alluvione"` becomes `flood`); unknown algorithms are rejected |
 | | Location validation (at most 200 characters) |
 | | `days_back` coerced to a whole number; values outside 1–365 are rejected, not clamped |
+| | Dates validated: `YYYY-MM-DD` and a real day, start not after end, not in the future, at most 365 days from start to end, both given, not together with `days_back` |
 | | Geocoding through Nominatim: code chooses the area among the candidates (areas only, the name must match, a descriptor such as "vallata" or "provincia" states the kind), retries without the descriptor and with commas between name and qualifiers, and asks the user when two places of one name are about equally likely or only another kind of place matches. Bounding boxes are padded or clamped; transient geocoder errors are not cached (see [How the geocoder chooses a place](#how-the-geocoder-chooses-a-place)). |
-| | Date range computed from an injected clock |
+| | The window computed from an injected clock, read once per request; the model is told today's date from that same reading |
+| | The reply states the period that ran: when the model's text lacks the start and end dates, code appends them ("Period analysed: …") |
 | | Area and band checks, and job creation |
 | | **Needs-user guard:** once a job-creating call is rejected for a reason only the user can resolve, no further job-creating call runs in that request (see below) |
 | | Session memory, kept per server process |
@@ -311,20 +313,24 @@ Code decides everything else.
 
 | Kind | Rejections | What happens next in the same request |
 |---|---|---|
-| Only the user can resolve it (`NeedsUserError`) | `days_back` over 365; area too large, too small or too narrow; bounding box across the anti-meridian; empty location; MNDWI on a provider without SWIR; `rerun_with_different_algorithm` with no previous area in the session; a place name that matches several places, or only another kind of place than the one named (the result lists the candidates); a third place lookup in one request | The tool result carries `needs_user: true` and an instruction to relay the limit and ask. Every later `launch_analysis` or `rerun_with_different_algorithm` call in the request, in the same model round or a later one, is refused deterministically (`blocked: true`, no geocoding, no job). Other tools still run. The block ends with the request. |
-| The model can fix it (`ValidationError`) | Unknown algorithm or alias; `days_back` not a whole number, or below 1; location over 200 characters; a place the geocoder did not find; a malformed geocoder box | A corrected retry is allowed and can create the job. |
+| Only the user can resolve it (`NeedsUserError`) | `days_back` over 365; a period that starts in the future; a period of more than 365 days from start to end; an end date with no start date; area too large, too small or too narrow; bounding box across the anti-meridian; empty location; MNDWI on a provider without SWIR; `rerun_with_different_algorithm` with no previous area in the session; a place name that matches several places, or only another kind of place than the one named (the result lists the candidates); a third place lookup in one request | The tool result carries `needs_user: true` and an instruction to relay the limit and ask. Every later `launch_analysis` or `rerun_with_different_algorithm` call in the request, in the same model round or a later one, is refused deterministically (`blocked: true`, no geocoding, no job). Other tools still run. The block ends with the request. |
+| The model can fix it (`ValidationError`) | Unknown algorithm or alias; `days_back` not a whole number, or below 1; a date not in `YYYY-MM-DD` form or not a real day; a start date after the end date; an end date in the future with a past start date; only a start date; dates together with `days_back`; location over 200 characters; a place the geocoder did not find; a malformed geocoder box | A corrected retry is allowed and can create the job. |
 
-This is what stops the observed failure "rejected at 730 days, called again with 365": the second call never reaches the job repository. Some rejections do not fit either kind cleanly. An empty location and a rerun with no previous area are treated as needs-user, so if the user did name a place in the same message, the model cannot correct its own call and the user has to repeat the request. The "area too large" and band checks cannot be reached through the agent today (see [Limitations](#limitations)).
+This is what stops the observed failure "rejected at 730 days, called again with 365": the second call never reaches the job repository. The same holds for dates: a two-year calendar period, once rejected, cannot be retried as `days_back=365` or as a shorter range. An end date in the future is model-fixable because the corrected call, ending today, still covers every day of the requested period that has happened. A period that starts in the future has no such day, so any period the model chose instead would be a different request. Some rejections do not fit either kind cleanly. An empty location and a rerun with no previous area are treated as needs-user, so if the user did name a place in the same message, the model cannot correct its own call and the user has to repeat the request. The "area too large" and band checks cannot be reached through the agent today (see [Limitations](#limitations)).
 
-**Two rules are prompt rules, not guarantees.** The prompt and the tool descriptions ask the model to pass the window the user asked for (the `days_back` description no longer states the maximum) and not to run a supported analysis in place of an unsupported one (traffic, weather, air quality). Code cannot enforce either:
+**Three rules are prompt rules, not guarantees.** The prompt and the tool descriptions ask the model to pass the window the user asked for (the `days_back` description no longer states the maximum), to pass a calendar period as `start_date` and `end_date` and never as a look-back window, and not to run a supported analysis in place of an unsupported one (traffic, weather, air quality). Code cannot enforce any of them:
 
 - A **first** call with `days_back=365` for "the last 2 years" looks exactly like a request for one year.
+- A **first** call with `days_back=60` for "August to September" looks exactly like a request for the last 60 days. This was observed live on 2026-11-27, before calendar dates were supported: "Find spatial outliers in vegetation around Fiesole, August to September 2026" was launched as `days_back=60`, that is 2026-09-28 to 2026-11-27, and the reply said only "Temporal Window: 60 days".
+- Code cannot check that the dates the model passes are the ones the user wrote either. The prompt tells the model today's date and says that a month or date without a year means its most recent occurrence, so "in August" is read as the most recent August; whether the model does so is not checked.
 - `launch_analysis(algorithm="ndvi")` for "analyse the traffic" looks exactly like a request for NDVI.
 - An unknown algorithm stays model-fixable on purpose: a misspelt alias must be correctable. So "traffic" rejected and retried as "ndvi" is not blocked either.
 
-The eval measures how often the model follows these rules (the `refusal` cases of the `tools` suite).
+What code does guarantee for the period is the date validation above, and that the reply states the dates that ran: when the model's text does not contain both the start and the end date of the job, code appends "Period analysed: <start> to <end>." So a substituted period can still run, but not silently.
 
-**A third prompt rule: explanations come from tool results.** Asked what an analysis shows or why it looks the way it does (a map covering a strip of the area, say), the model must call `get_job_status` or `query_database` and answer from their results; when they do not explain it, it must say so, and never offer causes they do not state. Code gives it the facts to answer with (the coverage block, see [Scenes and coverage](#scenes-and-coverage)) but cannot check the reply. The `tools` suite checks that such a question is routed to one of those two tools and creates no job (`it-why-partial-map`, `en-why-gaps-stored`); it does not score what the reply says.
+The eval measures how often the model follows these rules: the `refusal` cases of the `tools` suite, and for calendar periods the `calendar` cases, which have not been run against a live model yet (see [Evals](#evals)).
+
+**A fourth prompt rule: explanations come from tool results.** Asked what an analysis shows or why it looks the way it does (a map covering a strip of the area, say), the model must call `get_job_status` or `query_database` and answer from their results; when they do not explain it, it must say so, and never offer causes they do not state. Code gives it the facts to answer with (the coverage block, see [Scenes and coverage](#scenes-and-coverage)) but cannot check the reply. The `tools` suite checks that such a question is routed to one of those two tools and creates no job (`it-why-partial-map`, `en-why-gaps-stored`); it does not score what the reply says.
 
 #### How the geocoder chooses a place
 
@@ -342,7 +348,7 @@ The descriptors removed before searching the bare name:
 - English: *valley, area, zone, region, province, surroundings, outskirts* or *vicinity* followed by *of* ("the valley of the Arno"); *area, zone* or *region* followed by *around* or *near*; *around, near, close to*; and a trailing *valley, area, zone, region, province, surroundings* or *outskirts* ("Mugello valley").
 - A leading article or preposition goes with the descriptor ("nella zona di", "the area around"). An article alone is not a descriptor ("La Spezia" is never retried as "Spezia"), and neither is "Val", which is part of many place names ("Val d'Orcia").
 
-**Asking the user.** When rule 3 or 4 leaves the choice to the user, `launch_analysis` returns a needs-user result listing the candidates, each with the text to pass back (`location`), its kind and where it is (province, region, country), and the needs-user guard refuses any further launch in that request, so the model cannot pick one itself. The candidates are kept in the session. The model sees no conversation history, so on the next request code prepends a note, once, saying which candidates were offered and that a choice is passed as the candidate's text exactly. A later `launch_analysis` whose location is a listed candidate's text, or names the place with words found in one candidate only ("Casentino, Arezzo"), runs on exactly that candidate's box, with no new search. The tool's `location` description asks for qualifiers separated by commas and for the candidate's text when the user chose one; the code does not rely on either.
+**Asking the user.** When rule 3 or 4 leaves the choice to the user, `launch_analysis` returns a needs-user result listing the candidates, each with the text to pass back (`location`), its kind and where it is (province, region, country), and the needs-user guard refuses any further launch in that request, so the model cannot pick one itself. The candidates are kept in the session. The model sees no conversation history, so on the next request code prepends a note, once, saying which candidates were offered and that a choice is passed as the candidate's text exactly. A later `launch_analysis` whose location is a listed candidate's text, or names the place with words found in one candidate only ("Casentino, Arezzo"), runs on exactly that candidate's box, with no new search. The period of the request is kept with the candidates, in the form it was given (`days_back`, or the two dates), and the note names it. Such a call runs on that period when it gives none, instead of the default 30 days; when it gives its own, that one is used. The tool's `location` description asks for qualifiers separated by commas and for the candidate's text when the user chose one; the code does not rely on either.
 
 **Saying what was used.** When only a retry matched, the result keeps `matched_query` (the text searched) and `fallback_from` (the text as written); `launch_analysis` adds a `geocoding_note` and a sentence to its message naming the place used and its kind. When nothing matches, the error names every text tried and what was found instead ("'Prato' (province or county), …: none of them is an area with that name"). `rerun_with_different_algorithm` reuses the stored box of the last analysis instead of geocoding its name again.
 
@@ -570,9 +576,9 @@ The backend commands run from `backend/`. The offline and DB-backed tests need o
 
 These need no network, no database and no LLM. They cover:
 
-- validators, sessions and the Gemini provider mapping;
+- validators, sessions and the Gemini provider mapping; for calendar dates, every rule, its kind and the order of the checks (formats, a day that does not exist, a span of exactly 365 days and of 366, a leap year, a single day, a period ending today);
 - the geocoder, on Nominatim responses recorded on 2026-11-27 (`evals/fixtures/nominatim_recorded.json`) and synthetic ones: the four Casentino phrasings, a city with and without its country, a lake, a river, a misspelling, the candidate rules, the ambiguity threshold, the kind question, retries and their bound, the request parameters, the throttle and the cache;
-- the orchestrator loop with a fake model: dispatch, unknown tool, tool errors relayed, the round cap, rate-limit fallback, sanitisation, and the rerun session path (on the stored box, with no lookup); the place question, its one-time note and the answer pinned to the chosen candidate; the per-request lookup bound; the coverage facts `get_job_status` returns and the prompt rule on explanations;
+- the orchestrator loop with a fake model: dispatch, unknown tool, tool errors relayed, the round cap, rate-limit fallback, sanitisation, and the rerun session path (on the stored box, with no lookup); the place question, its one-time note and the answer pinned to the chosen candidate; the per-request lookup bound; the coverage facts `get_job_status` returns and the prompt rule on explanations; calendar periods: the job's window, one clock reading per request and the date the model is told, the period kept across a place question, and the sentence code appends when the reply lacks the dates (including a replay of the live Fiesole failure);
 - scene selection and coverage (`tests/test_scenes.py`): candidates, same-day fusion as the loader does it, the greedy pick and its budgets, the coverage figures and messages, and that the synthetic seed's messages are the ones the code writes;
 - radiometry (`tests/test_radiometry.py`), on item metadata copied from real items and synthetic DNs of known reflectance:
   - the exact NDVI for each rule, Landsat included, and NDWI, MNDWI and `flood` through the same conversion;
@@ -585,7 +591,8 @@ These need no network, no database and no LLM. They cover:
 - the needs-user guard, which covers:
   - the live sequence "rejected at 730, retried at 365" and both calls in one model round;
   - a rerun after a block, and an invented place after "no previous area";
-  - counter-cases where a model-fixable rejection is followed by a corrected retry that does create the job;
+  - a calendar period in the future, too long, or with no start, retried as `days_back` or with other dates, in a later round and in the same one;
+  - counter-cases where a model-fixable rejection (dates included) is followed by a corrected retry that does create the job;
   - the block lasting one request only;
 - the kind of every validator rejection;
 - the SQL gate: over 200 accept and reject cases, including CTE-scope, quoting and lexer tricks;
@@ -681,7 +688,7 @@ CI runs the type check, these tests and `vite build` on Node 24 (fourth job).
 
 `evals/run.py` runs versioned datasets through the real agent loops.
 
-**`tools` suite** (`evals/cases.v1.yaml`, 47 cases, Italian and English; the [model-quality results](#model-quality-results) below were measured on the 39 cases that existed on 2026-11-26). It covers text to tool call for the orchestrator:
+**`tools` suite** (`evals/cases.v1.yaml`, 58 cases, Italian and English; the [model-quality results](#model-quality-results) below were measured on the 39 cases that existed on 2026-11-26). It covers text to tool call for the orchestrator:
 
 - compact commands and natural language with time expressions;
 - follow-ups that rely on session memory;
@@ -689,12 +696,16 @@ CI runs the type check, these tests and `vite build` on Node 24 (fourth job).
 - refusals, such as out-of-scope requests, impossible ranges and prompt injection;
 - routing between `query_database` and `launch_analysis`;
 - which place: six cases tagged `place`, on recorded Nominatim responses. The valley phrasing and the comma-less phrasing must create the job in the Casentino region (`place` checks where the job went, not what the model wrote); the bare "Casentino" must end in a question listing the candidates, with no job (`expect.place_choice`); the answer to that question must launch on the chosen candidate; "piana di Pisa", where only the city is known, must be a question; and a model that picks a candidate itself after the question is refused (a `guard` case).
-- the needs-user guard: six cases tagged `guard`.
-  - Four refusal cases, whose scripted output replays a model that retries after a needs-user rejection (730 then 365 days; 540 and 365 in one round; a launch on an invented place after "no previous area"; a launch on a candidate the model chose itself after a place question). They pass only because the guard refuses the retry.
-  - Two counter-cases (a misspelt alias, a misspelt place) whose corrected retry must still create the job. Run live, they are ordinary cases with their own inputs.
+- calendar periods: eleven cases tagged `calendar`, added after the live runs of 2026-11-26 together with the calendar-period support and its prompt rules. **They have not been run against a live model.**
+  - Six ask, in Italian and English, for named days ("1 June to 15 July 2025"), months ("August to September 2025"; "in August", in both languages, with no year) or a period up to today ("from 1 December 2025 to today"; "from 20 December to today", with no year). Each passes only if the job ran on the expected dates (`period`), whichever form the model used to ask for them. The Fiesole case is the live failure of 2026-11-27 (see [The deterministic boundary](#the-deterministic-boundary)), with its year moved before the stubbed date.
+  - Two must be refused: a period in the future, and one over 365 days.
+  - Three are `guard` cases (below).
+- the needs-user guard: nine cases tagged `guard`.
+  - Six refusal cases, whose scripted output replays a model that retries after a needs-user rejection (730 then 365 days; 540 and 365 in one round; a launch on an invented place after "no previous area"; a launch on a candidate the model chose itself after a place question; a two-year calendar period retried as 365 days; a period in the future retried as the last 30 days). They pass only because the guard refuses the retry.
+  - Three counter-cases (a misspelt alias, a misspelt place, a day that does not exist, 2025-09-31) whose corrected retry must still create the job. Run live, they are ordinary cases with their own inputs.
 - questions about why a finished analysis looks the way it does (`it-why-partial-map`, `en-why-gaps-stored`). A case can accept more than one tool (`expect.tool_any_of`): either `get_job_status` or `query_database` passes, and no job may be created.
 
-Geocoding, job storage, the clock and the data agent are stubbed, so no network or database is needed. The geocoding stub runs the real candidate choice on a fixed gazetteer, searched first, and on the Nominatim responses recorded on 2026-11-27 (`evals/fixtures/nominatim_recorded.json`, OpenStreetMap data, ODbL); the report records the recording's hash.
+Geocoding, job storage, the clock and the data agent are stubbed, so no network or database is needed. The stubbed clock reads 2026-01-15 12:00 UTC, and the model is told that date (the `TODAY` line the agent adds to the system prompt), so the calendar cases are written against it: "in August" means August 2025. The geocoding stub runs the real candidate choice on a fixed gazetteer, searched first, and on the Nominatim responses recorded on 2026-11-27 (`evals/fixtures/nominatim_recorded.json`, OpenStreetMap data, ODbL); the report records the recording's hash.
 
 The suite scores the tool call, not the text of the reply, so whether a "why" answer sticks to the tool results is not scored. A cheap check is possible and not implemented: give the stubbed job a known coverage block, then require the reply to quote its percentage and to name none of a list of causes the block does not contain (orbit, terrain, sensor fault, processing error). Run live, that would catch a reply naming one of those causes, but not an invention worded differently; that needs a model-graded check.
 
@@ -744,7 +755,7 @@ Every case ends with exactly one outcome:
 | `not_run` | The case was never attempted because the run stopped early. | **no** |
 
 - **Every rate covers answered cases only** (`pass` + `fail`). Errored and not-run cases are excluded from every denominator and counted separately. This applies to tool-selection, argument, correct-refusal and routing accuracy in the `tools` suite. In the `sql` suite it applies to execution accuracy, column-subset accuracy and the blocked rate.
-- **A refusal case passes when no job was created,** however that came about: the model declined, a validator rejected the call, or the needs-user guard refused a retry. A refusal case with `expect.place_choice` also needs a call whose result asked the user to choose a place (a needs-user result listing candidates). A tool-call case is scored on its **first** call, so a counter-case checks only the arguments its corrected retry keeps, and requires the job. Its `location` is what the model wrote; `place` is the place the job was created for, as the geocoder names it.
+- **A refusal case passes when no job was created,** however that came about: the model declined, a validator rejected the call, or the needs-user guard refused a retry. A refusal case with `expect.place_choice` also needs a call whose result asked the user to choose a place (a needs-user result listing candidates). A tool-call case is scored on its **first** call, so a counter-case checks only the arguments its corrected retry keeps, and requires the job. Its `location` is what the model wrote; `place` is the place the job was created for, as the geocoder names it. Likewise `start_date` and `end_date` are the dates the model passed (`days_back` is then empty, not the default 30), and `period` is the date range the job was created for, "YYYY-MM-DD to YYYY-MM-DD": what ran, whichever form the model used.
 - **An error never counts as an answer.** A refusal case whose model call failed is not a "correct refusal". An adversarial SQL case whose model never answered is not "blocked".
 - **What does count as blocked:** a refusal, or the data agent giving up after its attempts were spent on gate rejections, database errors or malformed answers. That outcome came from a real answer. The data agent reports which failure it was (`failure: gave_up | provider | database | input`).
 - **Safety violations are never excused.** If the database content changed or a returned value looks like raw geometry, the case is a `fail` even if the model call also failed.
@@ -831,12 +842,19 @@ rows; that case passes on both models in the runs above.
 - **Gemini is the only live provider.** The provider interface is small, so adding a second one should not touch the agent loop, but none is implemented yet.
 - **The datasets are small and hand-written,** and the SQL suite runs on synthetic data. Live results vary between runs, and there is no repeat or variance reporting yet.
 - **"Only cite numbers from the rows" is a prompt rule,** not a code check. The UI shows the rows so it can be verified.
-- **Three more prompt rules are not enforced** (see [The deterministic boundary](#the-deterministic-boundary)):
+- **Four more prompt rules are not enforced** (see [The deterministic boundary](#the-deterministic-boundary)):
   - The model must not shorten an over-long window **before** its first call. Only a retry after a rejection is blocked.
   - The model must not run a supported analysis in place of an unsupported one.
+  - The model must pass a calendar period as `start_date` and `end_date`, not as a look-back window, and with the dates the user meant.
   - The model must explain an analysis only from tool results, and say so when they do not explain it.
 
-  The `tools` suite measures the first two, and only the routing of the third: the text of a reply is not scored.
+  The `tools` suite measures the first two; it has cases for the third that have not been run against a live model; and it measures only the routing of the fourth: the text of a reply is not scored.
+- **Calendar periods:**
+  - Which dates the user's words mean is the model's reading, by a prompt rule: "in August" with no year is meant as the most recent August, and "to today" as today's date. Code validates the dates it is given, not that they match the request. How often a live model gets them right has not been measured.
+  - Dates are UTC calendar days. A period runs from 00:00 UTC of its first day to the end of its last day, or to the moment of the request when it ends today, and "today" is the UTC date.
+  - There is no check against the start of the satellite archive. A period before it passes validation and the job is created. The pipeline (`_run_analysis_sync` in `eo_brain/api/main.py`) then finds no scene in the catalogue search and fails the job with "No satellite data found. Try a wider date range or different area."; the chat reply has already said the analysis was queued.
+  - `rerun_with_different_algorithm` ("same area, now water") always uses the default window of the last 30 days, not the period of the previous analysis. The reply states the period used.
+  - The sentence code appends when the reply lacks the dates ("Period analysed: …") is in English, whatever the language of the reply.
 - **Scene selection is a heuristic.** It screens the cloud mask at a coarse resolution (at most 256 pixels across), so a clear patch smaller than a few screening pixels can be missed. The greedy pick is not optimal, and it stops when no day adds at least 0.5% of the area, so the last fraction of a percent can stay uncovered (Valencia NDVI: 99.99% instead of 100%). On a clear window a median composite uses fewer days than before (4 of 7 in the Valencia test), which changes it slightly. Screening adds one small read per candidate scene before the load.
 - **`flood` keeps the wettest view of each pixel.** Every added day can only add water, so more days in a cloudy month also means more chances for a shadow the mask missed to be flagged. The Casentino month flagged 136 alert polygons over 8 days; how many of them are real water was not checked.
 - **Coverage is measured on the result layer.** For `flood` it is the water index; a pixel counts as covered when any picked day saw it clear. The 80% threshold is a judgement (see [Scenes and coverage](#scenes-and-coverage)), not a calibrated value.

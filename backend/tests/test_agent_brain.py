@@ -5,7 +5,7 @@ The model is a ScriptedProvider, the geocoder and the job repository are
 in-memory stubs: no network, no database, no API key.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
@@ -28,7 +28,9 @@ GAZETTEER = [
     {"name": "Firenze, Toscana, Italia", "aliases": ["firenze", "florence"], "bbox": [11.15, 43.72, 11.33, 43.83]},
     {"name": "Pisa, Toscana, Italia", "aliases": ["pisa"], "bbox": [10.33, 43.66, 10.48, 43.76]},
     {"name": "Bologna, Emilia-Romagna, Italia", "aliases": ["bologna"], "bbox": [11.23, 44.42, 11.43, 44.56]},
+    {"name": "Fiesole, Toscana, Italia", "aliases": ["fiesole"], "bbox": [11.25, 43.78, 11.35, 43.84]},
 ]
+UTC = timezone.utc
 
 
 def call(name, **args):
@@ -94,7 +96,10 @@ def test_provider_receives_system_prompt_and_all_tools():
     h = Harness([text("ciao")])
     h.agent.run("ciao", "s1")
     rec = h.provider.calls[0]
-    assert rec.system_prompt == SYSTEM_PROMPT
+    assert rec.system_prompt == (
+        SYSTEM_PROMPT + "\nTODAY: 2026-01-15 (UTC). Use it to resolve 'today', 'yesterday', "
+        "'this month' and dates given without a year."
+    )
     assert rec.tool_names == [t.name for t in TOOL_SPECS]
     assert rec.messages == [UserMessage(text="ciao")]
 
@@ -285,8 +290,29 @@ def test_empty_location_blocks_an_invented_place():
          {"location": "Firenze", "algorithm": "ndvi", "days_back": 1}, "must be >= 1"),
         ({"location": "Firenze " + "x" * 200, "algorithm": "ndvi"}, {"location": "Firenze", "algorithm": "ndvi"},
          "too long"),
+        ({"location": "Firenze", "algorithm": "ndvi", "days_back": 60, "start_date": "2025-08-01",
+          "end_date": "2025-09-30"},
+         {"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-08-01", "end_date": "2025-09-30"},
+         "not both"),
+        ({"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-12-01"},
+         {"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-12-01", "end_date": "2026-01-15"},
+         "end_date is missing"),
+        ({"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-12-01", "end_date": "2026-02-28"},
+         {"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-12-01", "end_date": "2026-01-15"},
+         "is in the future"),
+        ({"location": "Firenze", "algorithm": "ndvi", "start_date": "01/08/2025", "end_date": "2025-08-31"},
+         {"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-08-01", "end_date": "2025-08-31"},
+         "YYYY-MM-DD"),
+        ({"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-09-01", "end_date": "2025-09-31"},
+         {"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-09-01", "end_date": "2025-09-30"},
+         "not a real calendar day"),
+        ({"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-09-30", "end_date": "2025-08-01"},
+         {"location": "Firenze", "algorithm": "ndvi", "start_date": "2025-08-01", "end_date": "2025-09-30"},
+         "is after end_date"),
     ],
-    ids=["unknown-alias", "geocode-miss", "days-format", "days-zero", "location-too-long"],
+    ids=["unknown-alias", "geocode-miss", "days-format", "days-zero", "location-too-long",
+         "dates-and-days-back", "start-without-end", "end-in-future", "date-format", "date-not-a-day",
+         "start-after-end"],
 )
 def test_model_fixable_rejection_allows_the_corrected_retry(bad, fixed, fragment):
     h = Harness([call("launch_analysis", **bad), call("launch_analysis", **fixed), relay_tool_results])
@@ -349,6 +375,178 @@ def test_job_created_before_a_limit_is_kept_and_reported():
     res = h.agent.run("ndvi firenze, e pisa ultimi 2 anni", "s1")
     [job] = h.repo.all()
     assert res.job_id == str(job.id) and job.params["geocoded_name"].startswith("Firenze")
+
+
+# ---------------------------------------------------------------- the period: days_back or calendar dates
+
+def test_calendar_period_creates_the_job_on_exactly_those_days():
+    h = Harness([call("launch_analysis", location="Firenze", algorithm="ndvi",
+                      start_date="2025-08-01", end_date="2025-09-30"), relay_tool_results])
+    res = h.agent.run("ndvi florence, August to September 2025", "s1")
+    [job] = h.repo.all()
+    assert job.start_date == datetime(2025, 8, 1, tzinfo=UTC)
+    assert job.end_date == datetime(2025, 9, 30, 23, 59, 59, 999999, tzinfo=UTC)
+    [r] = h.tool_results_seen(1)
+    assert r.response["date_range"] == "2025-08-01 to 2025-09-30"
+    assert (r.response["start_date"], r.response["end_date"]) == ("2025-08-01", "2025-09-30")
+    assert "days_back" not in r.response  # a calendar period is never described as "N days"
+    assert "(2025-08-01 to 2025-09-30, 20m)" in r.response["message"]
+    assert res.text == r.response["message"]
+
+
+def test_look_back_result_keeps_days_back_and_states_the_dates():
+    h = Harness([call("launch_analysis", location="Firenze", algorithm="ndvi", days_back=90), relay_tool_results])
+    h.agent.run("ndvi florence, last 3 months", "s1")
+    [r] = h.tool_results_seen(1)
+    first = str((FIXED_NOW - timedelta(days=90)).date())
+    assert r.response["days_back"] == 90
+    assert (r.response["start_date"], r.response["end_date"]) == (first, "2026-01-15")
+    assert r.response["date_range"] == f"{first} to 2026-01-15"
+
+
+def test_calendar_period_ending_today_ends_at_the_clock_reading():
+    h = Harness([call("launch_analysis", location="Firenze", algorithm="ndvi",
+                      start_date="2025-12-01", end_date="2026-01-15"), relay_tool_results])
+    h.agent.run("ndvi florence from 1 December to today", "s1")
+    [job] = h.repo.all()
+    assert (job.start_date, job.end_date) == (datetime(2025, 12, 1, tzinfo=UTC), FIXED_NOW)
+
+
+@pytest.mark.parametrize("same_round", [False, True], ids=["later-round", "same-round"])
+@pytest.mark.parametrize(
+    "first,retry,fragment",
+    [
+        ({"start_date": "2027-03-01", "end_date": "2027-03-31"}, {"days_back": 30}, "starts in the future"),
+        ({"start_date": "2024-01-01", "end_date": "2025-12-31"}, {"days_back": 365}, "spans 730 days"),
+        ({"start_date": "2024-01-01", "end_date": "2025-12-31"},
+         {"start_date": "2025-01-01", "end_date": "2025-12-31"}, "spans 730 days"),
+        ({"end_date": "2025-09-30"}, {"start_date": "2025-09-01", "end_date": "2025-09-30"}, "no start date"),
+    ],
+    ids=["future-then-days-back", "too-long-then-365", "too-long-then-shorter-dates", "no-start-then-invented"],
+)
+def test_needs_user_period_blocks_any_retry(first, retry, fragment, same_round):
+    base = {"location": "Firenze", "algorithm": "ndvi"}
+    calls = [ToolCall("launch_analysis", {**base, **first}), ToolCall("launch_analysis", {**base, **retry})]
+    steps = [ModelTurn(tool_calls=calls)] if same_round else [ModelTurn(tool_calls=[c]) for c in calls]
+    h = Harness([*steps, relay_tool_results])
+    res = h.agent.run("x", "s1")
+    rejected, blocked = (c.result for c in res.tool_calls)
+    assert fragment in rejected["error"] and rejected["needs_user"] is True and "blocked" not in rejected
+    assert blocked["blocked"] is True and blocked["error"] == rejected["error"]
+    assert h.repo.all() == [] and res.job_id is None
+    assert h.geocoder.queries == []  # neither call reached the geocoder
+    assert "Period analysed" not in res.text
+
+
+def test_one_clock_reading_per_request_tells_the_model_today_and_sets_every_window():
+    reads = []
+
+    def clock():
+        reads.append(1)
+        return datetime(2026, 11, 27, 9, 30, tzinfo=UTC) + timedelta(hours=len(reads))
+
+    h = Harness([
+        ModelTurn(tool_calls=[
+            ToolCall("launch_analysis", {"location": "Firenze", "algorithm": "ndvi"}),
+            ToolCall("launch_analysis", {"location": "Pisa", "algorithm": "ndvi",
+                                         "start_date": "2026-11-01", "end_date": "2026-11-27"}),
+        ]),
+        relay_tool_results,
+    ])
+    h.agent.clock = clock
+    h.agent.run("ndvi florence, and pisa since the start of the month", "s1")
+    now = datetime(2026, 11, 27, 10, 30, tzinfo=UTC)
+    assert len(reads) == 1
+    assert [j.end_date for j in h.repo.all()] == [now, now]
+    assert all(c.system_prompt.endswith(
+        "TODAY: 2026-11-27 (UTC). Use it to resolve 'today', 'yesterday', 'this month' and dates "
+        "given without a year.") for c in h.provider.calls)
+
+
+def test_today_told_to_the_model_is_the_utc_date():
+    h = Harness([text("ok")])
+    h.agent.clock = lambda: datetime(2026, 11, 28, 0, 30, tzinfo=timezone(timedelta(hours=2)))
+    h.agent.run("hello", "s1")
+    assert "\nTODAY: 2026-11-27 (UTC)." in h.provider.calls[0].system_prompt
+
+
+def test_launch_schema_takes_calendar_dates_and_states_no_maximum():
+    spec = next(t for t in TOOL_SPECS if t.name == "launch_analysis")
+    props = spec.parameters["properties"]
+    assert spec.parameters["required"] == ["location", "algorithm"]
+    assert props["start_date"]["type"] == props["end_date"]["type"] == "string"
+    assert "YYYY-MM-DD" in props["start_date"]["description"]
+    assert "YYYY-MM-DD" in props["end_date"]["description"]
+    assert "Never turn a calendar period" in props["days_back"]["description"]
+    assert "today's date" in props["end_date"]["description"]
+    # The limit is the tool's to check: the model must not pre-shorten a period.
+    assert "maximum" not in str(spec.parameters) and "maximum" not in SYSTEM_PROMPT
+
+
+def test_prompt_rules_for_calendar_periods():
+    flat = " ".join(SYSTEM_PROMPT.split())  # rules are wrapped with continuation lines
+    rule10 = flat.split(" 10. ")[1].split(" 11. ")[0]
+    assert "Never convert a calendar period into days_back" in rule10
+    assert "most recent occurrence that is not in the future" in rule10
+    assert "pass start_date and end_date" in rule10 and "needs_user" in rule10
+    rule6 = flat.split(" 6. ")[1].split(" 7. ")[0]
+    assert "start and end dates from the tool result (date_range)" in rule6
+    assert "never only as a number of days" in rule6
+
+
+# The reply states the period that ran (code-written when the model's text lacks the dates).
+
+def test_reply_states_the_period_when_the_model_does_not():
+    # Replay of the live failure of 2026-11-27, on the test clock: "August to September"
+    # launched as days_back=60, reply "Temporal Window: 60 days". Code cannot tell this
+    # first call from a request for the last 60 days; it makes sure the reply says so.
+    h = Harness([call("launch_analysis", location="Fiesole", algorithm="lisa", days_back=60),
+                 text("LISA analysis launched for Fiesole. Temporal Window: 60 days.")])
+    res = h.agent.run("Find spatial outliers in vegetation around Fiesole, August to September 2026", "s1")
+    assert res.job_id is not None
+    assert res.text == ("LISA analysis launched for Fiesole. Temporal Window: 60 days.\n\n"
+                        "Period analysed: 2025-11-16 to 2026-01-15.")
+
+
+def test_reply_with_both_dates_is_left_unchanged():
+    reply = "LISA analysis launched for Fiesole, from 2025-08-01 to 2025-09-30."
+    h = Harness([call("launch_analysis", location="Fiesole", algorithm="lisa",
+                      start_date="2025-08-01", end_date="2025-09-30"), text(reply)])
+    assert h.agent.run("x", "s1").text == reply
+
+
+def test_dates_inside_a_stripped_marker_do_not_count():
+    h = Harness([call("launch_analysis", location="Fiesole", algorithm="lisa",
+                      start_date="2025-08-01", end_date="2025-09-30"),
+                 text("Done [JOB_CREATED:2025-08-01 to 2025-09-30]")])
+    assert h.agent.run("x", "s1").text == "Done\n\nPeriod analysed: 2025-08-01 to 2025-09-30."
+
+
+@pytest.mark.parametrize("steps", [
+    [text("hello")],
+    [call("launch_analysis", location="Firenze", algorithm="ndvi",
+          start_date="2027-03-01", end_date="2027-03-31"), relay_tool_results],
+], ids=["no-call", "rejected-period"])
+def test_no_job_no_period_sentence(steps):
+    res = Harness(steps).agent.run("x", "s1")
+    assert res.job_id is None and "Period analysed" not in res.text
+
+
+def test_round_cap_text_with_a_job_states_the_period():
+    steps = [call("launch_analysis", location="Firenze", algorithm="ndvi")]
+    steps += [call("list_capabilities") for _ in range(4)]
+    res = Harness(steps, max_tool_rounds=5).agent.run("x", "s1")
+    assert res.job_id is not None
+    assert res.text == "Analysis request is being processed.\n\nPeriod analysed: 2025-12-16 to 2026-01-15."
+
+
+def test_get_job_status_reports_the_calendar_days():
+    h = Harness([call("launch_analysis", location="Firenze", algorithm="ndvi",
+                      start_date="2025-08-01", end_date="2025-09-30"), text("ok"),
+                 call("get_job_status"), relay_tool_results])
+    h.agent.run("ndvi florence, August to September 2025", "s1")
+    status = h.agent.run("is it done?", "s1")
+    assert status.tool_calls[0].result["time_window"] == "2025-08-01 to 2025-09-30"
 
 
 # ---------------------------------------------------------------- loop limits
@@ -422,6 +620,7 @@ def test_failure_after_job_creation_does_not_duplicate_the_job():
     assert len(h.provider.calls) == 2  # no retry, no fallback
     assert res.job_id == str(h.repo.all()[0].id)
     assert res.text.startswith("Analysis 'NDVI' queued for Firenze")
+    assert "Period analysed" not in res.text  # the launch message already states the dates
 
 
 def test_requires_a_model():
@@ -698,6 +897,73 @@ def test_context_note_after_a_question_is_shown_once():
     assert "algorithm 'ndvi' and days_back 60" in first
     assert first.endswith("User message: quello in Toscana")
     assert h.provider.calls[-1].messages == [UserMessage(text="grazie")]
+
+
+def ask_casentino_dates(h, session="s1"):
+    h.add(call("launch_analysis", location="Casentino", algorithm="ndvi",
+               start_date="2025-08-01", end_date="2025-09-30"), relay_tool_results)
+    return h.agent.run("ndvi Casentino, August to September 2025", session)
+
+
+def test_place_question_remembers_a_calendar_period_and_the_answer_runs_on_it():
+    h = place_harness()
+    asked = ask_casentino_dates(h)
+    assert asked.job_id is None and asked.tool_calls[0].result["candidates"]
+    pending = h.sessions.get_or_create("s1").get_context("pending_place")
+    assert (pending["days_back"], pending["start_date"], pending["end_date"]) == (None, "2025-08-01", "2025-09-30")
+
+    h.add(call("launch_analysis", location=REGION, algorithm="ndvi"), relay_tool_results)  # no period
+    res = h.agent.run("the one in the province of Arezzo", "s1")
+    note = h.provider.calls[-2].messages[0].text
+    assert "(ndvi, 2025-08-01 to 2025-09-30)" in note
+    assert "algorithm 'ndvi', start_date 2025-08-01 and end_date 2025-09-30" in note
+    [job] = h.repo.all()
+    assert res.job_id == str(job.id) and job.params["geocoded_name"] == REGION
+    assert job.start_date == datetime(2025, 8, 1, tzinfo=UTC)
+    assert job.end_date == datetime(2025, 9, 30, 23, 59, 59, 999999, tzinfo=UTC)
+    assert "days_back" not in res.tool_calls[0].result
+
+
+@pytest.mark.parametrize(
+    "own,start,end",
+    [({"days_back": 14}, FIXED_NOW - timedelta(days=14), FIXED_NOW),
+     ({"start_date": "2025-07-01", "end_date": "2025-07-31"},
+      datetime(2025, 7, 1, tzinfo=UTC), datetime(2025, 7, 31, 23, 59, 59, 999999, tzinfo=UTC))],
+    ids=["days-back", "dates"],
+)
+def test_an_answer_with_its_own_period_uses_it(own, start, end):
+    h = place_harness()
+    ask_casentino_dates(h)
+    h.add(call("launch_analysis", location=REGION, algorithm="ndvi", **own), relay_tool_results)
+    h.agent.run("the Arezzo one, but another period", "s1")
+    [job] = h.repo.all()
+    assert (job.start_date, job.end_date) == (start, end)
+
+
+def test_the_answer_without_a_period_reapplies_the_remembered_look_back_window():
+    h = place_harness(call("launch_analysis", location="Casentino", algorithm="ndvi", days_back=90),
+                      relay_tool_results)
+    h.agent.run("ndvi Casentino, last 3 months", "s1")
+    assert h.sessions.get_or_create("s1").get_context("pending_place")["days_back"] == 90
+    later = FIXED_NOW + timedelta(days=1)
+    h.agent.clock = lambda: later
+    h.add(call("launch_analysis", location=REGION, algorithm="ndvi"), relay_tool_results)
+    res = h.agent.run("the Arezzo one", "s1")
+    [job] = h.repo.all()
+    assert (job.start_date, job.end_date) == (later - timedelta(days=90), later)
+    assert res.tool_calls[0].result["days_back"] == 90
+
+
+def test_a_remembered_calendar_period_is_checked_again_against_the_new_clock():
+    h = place_harness(call("launch_analysis", location="Casentino", algorithm="ndvi",
+                           start_date="2025-12-01", end_date="2026-01-15"), relay_tool_results)
+    h.agent.run("ndvi Casentino from 1 December to today", "s1")
+    h.agent.clock = lambda: FIXED_NOW + timedelta(days=1)
+    h.add(call("launch_analysis", location=REGION, algorithm="ndvi"), relay_tool_results)
+    h.agent.run("the Arezzo one", "s1")
+    [job] = h.repo.all()
+    # The period asked for ended on 2026-01-15; the next day it ends at the end of that day.
+    assert job.end_date == datetime(2026, 1, 15, 23, 59, 59, 999999, tzinfo=UTC)
 
 
 def test_valley_phrasing_launches_on_the_region_and_says_how_it_was_found():

@@ -13,9 +13,12 @@ clock, sleep) is injected into ``Agent``, so the loop runs in tests and
 evals with no network, database or API key.
 
 Division of labour:
-  * the model decides WHICH tool to call and with WHICH raw arguments;
-  * code decides everything else - alias resolution, range checks,
-    geocoding, bbox/resolution rules, job creation, session context.
+  * the model decides WHICH tool to call and with WHICH raw arguments,
+    including the period: days_back, or start_date and end_date;
+  * code decides everything else - alias resolution, range and date checks,
+    the window (from one clock reading per request, the same reading that
+    tells the model today's date), geocoding, bbox/resolution rules, job
+    creation, session context, and a reply that states the period that ran.
 
 Rejections come in two kinds (validators.ValidationError / NeedsUserError).
 After a job-creating call is rejected for a reason only the user can resolve
@@ -38,7 +41,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from uuid import UUID
 
@@ -60,14 +63,17 @@ from eo_brain.agent.llm import (
 )
 from eo_brain.agent.session import SessionStore, session_store
 from eo_brain.agent.validators import (
+    Period,
     ValidationError,
+    as_utc,
+    date_given,
     estimate_area_km2,
     resolve_algorithm,
+    resolve_period,
     resolve_resolution,
     validate_algorithm_compatibility,
     validate_bbox,
     validate_location,
-    validate_temporal_range,
 )
 from eo_brain.algorithms.base import ALGORITHMS as ALGO_REGISTRY
 
@@ -171,10 +177,32 @@ TOOL_SPECS: List[ToolSpec] = [
                 "days_back": {
                     "type": "integer",
                     "description": (
-                        "Temporal window in days, exactly as the user asked "
-                        "('last 3 months' = 90, 'last 2 years' = 730). Omit it when the "
-                        "user gives no window (default 30). Never shorten it to fit a "
-                        "limit: the tool checks the limit."
+                        "A look-back window in days ending today, for 'the last N days, weeks, "
+                        "months or years', exactly as the user asked ('last week' = 7, "
+                        "'last 3 months' = 90, 'last year' = 365, 'last 2 years' = 730). "
+                        "Never turn a calendar period (named dates, months, seasons or years) "
+                        "into days_back: a look-back window ends today, so it would analyse a "
+                        "different period; pass start_date and end_date instead. Pass neither "
+                        "days_back nor dates when the user gives no period (default: the last "
+                        "30 days). Never shorten or shift a period to fit a limit: the tool "
+                        "checks the limits."
+                    ),
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": (
+                        "First day of the period, YYYY-MM-DD, inclusive (UTC), when the user "
+                        "names calendar dates, months, seasons or years: 'August to September "
+                        "2026' = 2026-08-01 to 2026-09-30; 'on 3 November 2026' = 2026-11-03 "
+                        "to 2026-11-03. Always together with end_date, never with days_back."
+                    ),
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": (
+                        "Last day of the period, YYYY-MM-DD, inclusive (UTC). Always together "
+                        "with start_date. For a period that runs up to now ('since 1 October', "
+                        "'from X to today'), end_date is today's date."
                     ),
                 },
             },
@@ -268,17 +296,25 @@ RULES:
 5. NEVER run analyses the user did not request. If the user asks for something the analyses above \
    do not measure (traffic, weather, air quality, population, ...), say it is not supported and list \
    what is supported; do not run a supported analysis in its place.
-6. After a successful tool call, briefly confirm what was launched and the estimated time.
+6. After a successful launch, briefly confirm what was launched, the period as the start and end \
+   dates from the tool result (date_range), never only as a number of days, and the estimated time.
 7. You understand Italian and English. Respond in the same language the user writes in.
 8. Default to Italian when the language is ambiguous (short commands, place names only).
 9. When parsing compact input like "ndvi firenze", treat the first token as the algorithm \
    and the rest as the location. Call launch_analysis immediately.
-10. The days_back parameter controls the temporal window. Default is 30 days. \
-   If the user says "last 3 months" use days_back=90, "last year" use days_back=365, \
-   "last week" use days_back=7, etc. Always interpret temporal references. \
-   Pass the window the user asked for even when it looks long ("last 2 years" = 730, \
-   "last 5 years" = 1825); never shorten it yourself. If it is over the limit the tool \
-   rejects it: tell the user the limit and ask which window they want.
+10. The period of an analysis is given in one of two ways. Always interpret temporal references. \
+   For "the last N days/weeks/months/years" pass days_back, a look-back window ending today: \
+   "last week" = 7, "last 3 months" = 90, "last year" = 365, "last 2 years" = 730, \
+   "last 5 years" = 1825. When the user names calendar dates, months, seasons or years \
+   ("August to September 2026", "in March", "since 1 October", "on 3 November 2026"), pass \
+   start_date and end_date (YYYY-MM-DD, both inclusive) and no days_back. Never convert a \
+   calendar period into days_back: a look-back window ends today, so it would analyse a \
+   different period. A month or date given without a year means its most recent occurrence \
+   that is not in the future (see TODAY below); for a month still in progress, or a period \
+   "to today", end_date is today's date. With no period at all, pass neither (default: the \
+   last 30 days). Pass the period the user asked for even when it looks long; never shorten or \
+   shift it yourself. If the tool rejects it with needs_user, tell the user the limit and ask \
+   which period they want.
 11. Route by intent: a request to analyze an area now -> launch_analysis. A question about \
    analyses that already exist (how many, how much area, which ones, compare, status history) \
    -> query_database with the question. Never launch an analysis to answer such a question.
@@ -314,6 +350,34 @@ def _window(start: Any, end: Any) -> Optional[str]:
     return f"{str(start)[:10]} to {str(end)[:10]}"
 
 
+def today_line(now: datetime) -> str:
+    """Appended to the system prompt of each request: the model has no clock of its own."""
+    return (
+        f"TODAY: {as_utc(now).date()} (UTC). Use it to resolve 'today', 'yesterday', "
+        "'this month' and dates given without a year."
+    )
+
+
+def _period_args(period: Period) -> Dict[str, Any]:
+    """The period in the form it was requested, as launch_analysis arguments."""
+    if period.days_back is not None:
+        return {"days_back": period.days_back, "start_date": None, "end_date": None}
+    return {"days_back": None, "start_date": str(period.start_date), "end_date": str(period.end_date)}
+
+
+def _with_period(text: str, launch: Dict[str, Any]) -> str:
+    """
+    The reply states the period that ran. A first call with days_back=60 for
+    "August to September" looks like a request for the last 60 days, so code
+    cannot catch that substitution; it can make sure it is not silent.
+    """
+    start, end = launch.get("start_date"), launch.get("end_date")
+    if not start or not end or (start in text and end in text):
+        return text
+    sentence = f"Period analysed: {start} to {end}."
+    return f"{text}\n\n{sentence}" if text else sentence
+
+
 # -- Per-request bookkeeping --
 
 @dataclass
@@ -333,6 +397,9 @@ class _RequestContext:
     """
 
     session_id: str
+    # The one clock reading of this request: today's date for the model,
+    # date validation and every window (set by run(), else on first use).
+    now: Optional[datetime] = None
     created_jobs: List[str] = field(default_factory=list)
     last_launch: Optional[Dict[str, Any]] = None
     last_query: Optional[Any] = None  # DataAgentResult of the last successful query
@@ -409,35 +476,46 @@ class Agent:
 
     # -- Tool implementations --
 
+    def _now(self, ctx: _RequestContext) -> datetime:
+        if ctx.now is None:
+            ctx.now = self.clock()
+        return ctx.now
+
     def _launch_analysis(
         self,
         ctx: _RequestContext,
         location: str,
         algorithm: str,
-        days_back: Optional[int] = _DEFAULT_DAYS_BACK,
+        days_back: Any = None,
+        start_date: Any = None,
+        end_date: Any = None,
     ) -> Dict[str, Any]:
         """Geocode + create analysis job. Returns dict with job_id or error."""
-        return self._launch(ctx, location, algorithm, days_back)
+        return self._launch(ctx, location, algorithm, days_back=days_back,
+                            start_date=start_date, end_date=end_date)
 
     def _launch(
         self,
         ctx: _RequestContext,
         location: str,
         algorithm: str,
-        days_back: Optional[int] = _DEFAULT_DAYS_BACK,
+        days_back: Any = None,
+        start_date: Any = None,
+        end_date: Any = None,
         place: Optional[GeocodingResult] = None,
     ) -> Dict[str, Any]:
-        """``place``: an area already resolved (rerun on the session's area); no lookup then."""
+        """
+        ``place``: an area already resolved (rerun on the session's area); no lookup then.
+        No period argument at all means the default window, or, for the answer to a
+        place question, the period of the request that asked it.
+        """
         logger.info(
-            f"launch_analysis: location='{location}', algorithm='{algorithm}', days_back={days_back}"
+            f"launch_analysis: location='{location}', algorithm='{algorithm}', "
+            f"days_back={days_back}, start_date={start_date}, end_date={end_date}"
         )
-        if days_back is None:
-            days_back = _DEFAULT_DAYS_BACK
-
         try:
             location = validate_location(location)
             algo = resolve_algorithm(algorithm)
-            days_back = validate_temporal_range(days_back)
         except ValidationError as e:
             logger.warning(f"Validation failed: {e}")
             return _rejection(str(e), needs_user=e.needs_user)
@@ -445,6 +523,21 @@ class Agent:
         geo = place if place is not None else self._pending_choice(ctx, location)
         if geo is not None and place is None:
             logger.info(f"'{location}' is a candidate the user was asked to choose: {geo.name}")
+            if days_back is None and not date_given(start_date) and not date_given(end_date):
+                # The answer to a place question often repeats no period: the
+                # user already gave one, with the request that was asked about.
+                remembered = self._pending_period(ctx)
+                days_back, start_date, end_date = (
+                    remembered["days_back"], remembered["start_date"], remembered["end_date"]
+                )
+
+        try:
+            period = resolve_period(days_back, start_date, end_date, self._now(ctx),
+                                    default_days_back=_DEFAULT_DAYS_BACK)
+        except ValidationError as e:
+            logger.warning(f"Period rejected: {e}")
+            return _rejection(str(e), needs_user=e.needs_user)
+
         if geo is None:
             if ctx.geocodes >= _MAX_GEOCODES_PER_REQUEST:
                 return _rejection(
@@ -461,7 +554,7 @@ class Agent:
                 # Only the user can choose: list the candidates and remember them,
                 # so that the answer resolves to exactly the one chosen.
                 logger.info(f"Place choice needed for '{location}': {[c.label for c in e.candidates]}")
-                self._remember_choice(ctx, e, algo, days_back)
+                self._remember_choice(ctx, e, algo, period)
                 return _choice_rejection(e)
             except ValueError as e:
                 # Model-fixable: the name may be misspelt or too vague.
@@ -476,15 +569,13 @@ class Agent:
 
         try:
             resolution = resolve_resolution(bbox, requested=10)
-            end_date = self.clock()
-            start_date = end_date - timedelta(days=days_back)
 
             job = self.job_repo.create(
                 algorithm=algo,
                 provider=_PROVIDER_NAME,
                 bbox=bbox,
-                start_date=start_date,
-                end_date=end_date,
+                start_date=period.start,
+                end_date=period.end,
                 params={
                     "resolution_m": resolution,
                     "geocoded_name": geo.name,
@@ -519,18 +610,23 @@ class Agent:
         else:
             time_est = "2-4 minutes"
 
+        first, last = str(period.start_date), str(period.end_date)
         result = {
             "job_id": str(job.id), "status": "pending", "algorithm": algo,
             "location": geo.name, "bbox": bbox, "resolution_m": resolution,
-            "days_back": days_back,
-            "date_range": f"{start_date.date()} to {end_date.date()}",
+            "date_range": f"{first} to {last}",
+            "start_date": first, "end_date": last,
             "estimated_time": time_est,
             "message": (
                 f"Analysis '{algo.upper()}' queued for {geo.name} "
-                f"({start_date.date()} to {end_date.date()}, {resolution}m). "
+                f"({first} to {last}, {resolution}m). "
                 f"Estimated time: {time_est}."
             ),
         }
+        if period.days_back is not None:
+            # Only for the look-back form: a calendar period must not be
+            # described back to the user as "N days".
+            result["days_back"] = period.days_back
         kind = f" ({geo.kind})" if getattr(geo, "kind", None) else ""
         notes, said = [], []
         fallback_from = getattr(geo, "fallback_from", None)
@@ -556,13 +652,18 @@ class Agent:
 
     # -- Choosing among places --
 
-    def _remember_choice(self, ctx: _RequestContext, e: PlaceChoiceNeeded, algo: str, days_back: int) -> None:
+    def _remember_choice(self, ctx: _RequestContext, e: PlaceChoiceNeeded, algo: str, period: Period) -> None:
         if not ctx.session_id:
             return
         self.sessions.get_or_create(ctx.session_id).set_context(pending_place={
-            "query": e.query, "reason": e.reason, "algorithm": algo, "days_back": days_back,
+            "query": e.query, "reason": e.reason, "algorithm": algo, **_period_args(period),
             "candidates": list(e.candidates), "note_shown": False,
         })
+
+    def _pending_period(self, ctx: _RequestContext) -> Dict[str, Any]:
+        """The period of the request that asked the place question, as it was requested."""
+        pending = self.sessions.get_or_create(ctx.session_id).get_context("pending_place") or {}
+        return {k: pending.get(k) for k in ("days_back", "start_date", "end_date")}
 
     def _pending_choice(self, ctx: _RequestContext, location: str) -> Optional[GeocodingResult]:
         """
@@ -600,13 +701,20 @@ class Agent:
             return None
         pending["note_shown"] = True
         listed = "; ".join(f"{i}) {c.label} ({c.kind})" for i, c in enumerate(pending["candidates"], 1))
+        algo = pending["algorithm"]
+        if pending.get("days_back") is not None:
+            period = f"{pending['days_back']} days"
+            pass_back = f"algorithm '{algo}' and days_back {pending['days_back']}"
+        else:
+            period = f"{pending['start_date']} to {pending['end_date']}"
+            pass_back = (f"algorithm '{algo}', start_date {pending['start_date']} and "
+                         f"end_date {pending['end_date']}")
         return (
             "[Context from the app, not written by the user: the previous reply asked the user to "
-            f"choose the place for '{pending['query']}' ({pending['algorithm']}, "
-            f"{pending['days_back']} days). Candidates: {listed}. If the message below chooses one of "
-            "them (by number, name, province or region), call launch_analysis with location set to "
-            f"that candidate's text exactly as listed, algorithm '{pending['algorithm']}' and "
-            f"days_back {pending['days_back']}. Otherwise ignore this context.]"
+            f"choose the place for '{pending['query']}' ({algo}, {period}). Candidates: {listed}. "
+            "If the message below chooses one of them (by number, name, province or region), call "
+            f"launch_analysis with location set to that candidate's text exactly as listed, "
+            f"{pass_back}. Otherwise ignore this context.]"
         )
 
     def _get_job_status(self, ctx: _RequestContext, job_id: Optional[str] = None) -> Dict[str, Any]:
@@ -747,11 +855,12 @@ class Agent:
         the model answers with text or the round cap is hit.
         """
         messages: List[Message] = [UserMessage(text=message)]
+        system_prompt = f"{self.system_prompt}\n{today_line(self._now(ctx))}"
 
         for _ in range(self.max_tool_rounds):
             turn = self.provider.generate(
                 model=model,
-                system_prompt=self.system_prompt,
+                system_prompt=system_prompt,
                 tools=self.tools,
                 messages=messages,
             )
@@ -828,7 +937,7 @@ class Agent:
             return AgentResult(text="Please enter a message.")
 
         self.sessions.get_or_create(session_id)
-        ctx = _RequestContext(session_id=session_id)
+        ctx = _RequestContext(session_id=session_id, now=self.clock())
         note = self._pending_note(session_id)
         model_message = f"{note}\n\nUser message: {message}" if note else message
 
@@ -843,6 +952,8 @@ class Agent:
             logger.info(f"Job created via tool call: {job_id}")
 
         reply_text = re.sub(r"\s*\[JOB_CREATED:[^\]]*\]", "", reply_text).strip()
+        if job_id and ctx.last_launch is not None:
+            reply_text = _with_period(reply_text, ctx.last_launch)
 
         # Pass bbox back so frontend can fly to the analysis area
         bbox = None

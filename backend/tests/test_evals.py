@@ -11,8 +11,8 @@ import yaml
 
 from eo_brain.agent.brain import AgentResult, ToolInvocation
 from evals import run as runner
-from evals.scoring import check_constraint, score_case, summarize
-from evals.stubs import StubGeocoder, contains_phrase, normalize
+from evals.scoring import check_constraint, effective_args, score_case, summarize
+from evals.stubs import FIXED_NOW, StubGeocoder, contains_phrase, normalize
 
 GAZ = [
     {"name": "Firenze, Toscana, Italia", "aliases": ["firenze", "florence"], "bbox": [11.15, 43.72, 11.33, 43.83]},
@@ -124,6 +124,46 @@ class TestScoring:
         r = score_case(case, _result([_launch({"location": "Firenze", "days_back": 90}, job=False)]))
         assert r.effective_args["place"] is None and not r.passed
 
+    def test_calendar_call_reports_its_dates_and_what_ran(self):
+        inv = ToolInvocation(
+            "launch_analysis",
+            {"location": "Fiesole", "algorithm": "lisa", "start_date": " 2025-08-01 ", "end_date": "2025-09-30"},
+            {"job_id": "j1", "algorithm": "lisa", "location": "Fiesole", "date_range": "2025-08-01 to 2025-09-30"},
+        )
+        eff = effective_args(inv)
+        assert (eff["start_date"], eff["end_date"]) == ("2025-08-01", "2025-09-30")
+        assert eff["days_back"] is None  # not the default 30: the call gave dates
+        assert eff["period"] == "2025-08-01 to 2025-09-30"
+
+    def test_look_back_call_has_no_dates_and_its_period_is_the_jobs(self):
+        inv = ToolInvocation(
+            "launch_analysis", {"location": "Fiesole", "algorithm": "lisa", "days_back": 60},
+            {"job_id": "j1", "algorithm": "lisa", "location": "Fiesole", "date_range": "2025-11-16 to 2026-01-15"},
+        )
+        eff = effective_args(inv)
+        assert (eff["days_back"], eff["start_date"], eff["end_date"]) == (60, None, None)
+        assert eff["period"] == "2025-11-16 to 2026-01-15"
+
+    def test_blank_dates_count_as_not_given(self):
+        eff = effective_args(ToolInvocation("launch_analysis", {"location": "x", "start_date": "", "end_date": " "},
+                                            {"error": "x"}))
+        assert (eff["days_back"], eff["start_date"], eff["end_date"], eff["period"]) == (30, None, None, None)
+
+    def test_period_checks_what_ran_not_the_form(self):
+        case = {"id": "p", "expect": {"type": "tool_call", "tool": "launch_analysis",
+                                      "args": {"period": {"equals": "2025-08-01 to 2025-09-30"}}}}
+
+        def run(args, date_range=None):
+            result = ({"job_id": "j1", "algorithm": "lisa", "location": "Fiesole", "date_range": date_range}
+                      if date_range else {"error": "rejected"})
+            return score_case(case, _result([ToolInvocation("launch_analysis", args, result)],
+                                            "j1" if date_range else None))
+
+        assert run({"start_date": "2025-08-01", "end_date": "2025-09-30"}, "2025-08-01 to 2025-09-30").passed
+        live_failure = run({"days_back": 60}, "2026-09-28 to 2026-11-27")  # "August to September" as 60 days
+        assert not live_failure.passed and live_failure.arg_checks == {"period": False}
+        assert not run({"start_date": "2025-08-01", "end_date": "2025-09-30"}).passed  # no job, no period
+
     def test_place_choice_refusal_needs_a_question(self):
         case = {"id": "r", "expect": {"type": "refusal", "place_choice": True}}
         asked = ToolInvocation("launch_analysis", {"location": "Casentino"},
@@ -169,6 +209,15 @@ class TestDataset:
         for case in data["cases"]:
             for turn in [*case.get("setup", []), case]:
                 assert runner.scripted_steps(turn), case["id"]
+
+    def test_calendar_periods_are_written_against_the_eval_clock(self):
+        data = runner.load_dataset(runner.DEFAULT_CASES)
+        periods = [c["expect"]["args"]["period"]["equals"] for c in data["cases"]
+                   if "period" in (c["expect"].get("args") or {})]
+        assert periods
+        for p in periods:
+            first, last = p.split(" to ")
+            assert first <= last <= str(FIXED_NOW.date()), p
 
 
 class TestGuardCases:

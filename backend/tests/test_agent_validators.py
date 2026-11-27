@@ -1,6 +1,7 @@
 """Unit tests for eo_brain.agent.validators (deterministic guardrails)."""
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -10,6 +11,7 @@ from eo_brain.agent.validators import (
     clamp_geocoder_bbox,
     estimate_area_km2,
     resolve_algorithm,
+    resolve_period,
     resolve_resolution,
     validate_algorithm_compatibility,
     validate_bbox,
@@ -18,6 +20,12 @@ from eo_brain.agent.validators import (
 )
 
 FLORENCE = [11.15, 43.72, 11.33, 43.83]
+NOW = datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc)
+UTC = timezone.utc
+
+
+def period(days_back=None, start=None, end=None, now=NOW):
+    return resolve_period(days_back, start, end, now, default_days_back=30)
 
 
 class TestResolveAlgorithm:
@@ -86,6 +94,134 @@ class TestTemporalRange:
     def test_non_whole_numbers_rejected(self, raw):
         with pytest.raises(ValidationError, match="whole number"):
             validate_temporal_range(raw)
+
+
+class TestResolvePeriod:
+    """The window of a launch: days_back (look-back) or start_date + end_date (calendar)."""
+
+    # -- look-back form: exactly the old window
+    def test_default_window(self):
+        p = period()
+        assert (p.start, p.end, p.days_back) == (NOW - timedelta(days=30), NOW, 30)
+
+    def test_days_back_window(self):
+        p = period(90)
+        assert (p.start, p.end, p.days_back) == (NOW - timedelta(days=90), NOW, 90)
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_empty_dates_are_not_given(self, blank):
+        p = period(7, blank, blank)
+        assert (p.start, p.days_back) == (NOW - timedelta(days=7), 7)
+
+    def test_days_back_limits_still_apply(self):
+        with pytest.raises(NeedsUserError, match="exceeds maximum"):
+            period(730)
+        with pytest.raises(ValidationError, match="whole number"):
+            period("three months")
+
+    # -- calendar form
+    def test_past_period_runs_from_midnight_to_the_end_of_its_last_day(self):
+        p = period(start="2025-08-01", end="2025-09-30")
+        assert p.start == datetime(2025, 8, 1, tzinfo=UTC)
+        assert p.end == datetime(2025, 9, 30, 23, 59, 59, 999999, tzinfo=UTC)
+        assert p.days_back is None
+        assert (str(p.start)[:10], str(p.end)[:10]) == ("2025-08-01", "2025-09-30")
+
+    def test_period_ending_today_ends_at_the_clock_reading(self):
+        p = period(start="2025-12-01", end="2026-01-15")
+        assert (p.start, p.end) == (datetime(2025, 12, 1, tzinfo=UTC), NOW)
+
+    def test_single_day(self):
+        p = period(start="2025-11-03", end="2025-11-03")
+        assert p.start == datetime(2025, 11, 3, tzinfo=UTC)
+        assert p.end == datetime(2025, 11, 3, 23, 59, 59, 999999, tzinfo=UTC)
+        today = period(start="2026-01-15", end="2026-01-15")
+        assert (today.start, today.end) == (datetime(2026, 1, 15, tzinfo=UTC), NOW)
+
+    def test_dates_are_stripped(self):
+        assert period(start=" 2025-08-01 ", end="2025-08-31\n").start_date.isoformat() == "2025-08-01"
+
+    @pytest.mark.parametrize(
+        "start,end",
+        [("2025-01-01", "2026-01-01"),    # 365 days from start to end
+         ("2024-01-01", "2024-12-31"),    # a leap calendar year
+         ("2025-01-01", "2025-12-31")],
+        ids=["span-365", "leap-year", "calendar-year"],
+    )
+    def test_up_to_365_days_from_start_to_end(self, start, end):
+        assert period(start=start, end=end).start_date.isoformat() == start
+
+    def test_366_days_is_refused(self):
+        with pytest.raises(NeedsUserError) as exc:
+            period(start="2024-12-31", end="2026-01-01")
+        assert "2024-12-31 to 2026-01-01 spans 366 days" in str(exc.value)
+        assert "maximum of 365 days" in str(exc.value)
+
+    def test_both_forms_together(self):
+        with pytest.raises(ValidationError, match="not both") as exc:
+            period(30, "2025-08-01", "2025-09-30")
+        assert not exc.value.needs_user
+
+    def test_start_without_end_says_today(self):
+        with pytest.raises(ValidationError, match=r"end_date is missing.*\(2026-01-15\)") as exc:
+            period(start="2025-12-01")
+        assert not exc.value.needs_user
+
+    @pytest.mark.parametrize("end", ["2025-09-30", "not a date"])
+    def test_end_without_start_needs_the_user(self, end):
+        # Checked before the format: any start would be invented.
+        with pytest.raises(NeedsUserError, match="no start date"):
+            period(start="  ", end=end)
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["2025-8-1", "01/08/2025", "2025-08-01T00:00:00Z", 20250801, True,
+         "２０２５-08-01"],   # full-width digits: \d would accept them
+        ids=["no-padding", "dd/mm/yyyy", "datetime", "int", "bool", "non-ascii-digits"],
+    )
+    @pytest.mark.parametrize("which", ["start_date", "end_date"])
+    def test_malformed_date(self, bad, which):
+        args = {"start": "2025-08-01", "end": "2025-08-31"}
+        args["start" if which == "start_date" else "end"] = bad
+        with pytest.raises(ValidationError) as exc:
+            period(**args)
+        msg = str(exc.value)
+        assert not exc.value.needs_user
+        assert msg.startswith(which) and "YYYY-MM-DD" in msg and repr(bad) in msg
+
+    def test_day_that_does_not_exist(self):
+        with pytest.raises(ValidationError, match="end_date '2025-09-31' is not a real calendar day") as exc:
+            period(start="2025-09-01", end="2025-09-31")
+        assert "YYYY-MM-DD" in str(exc.value) and not exc.value.needs_user
+
+    def test_start_after_end(self):
+        with pytest.raises(ValidationError, match="start_date 2025-09-30 is after end_date 2025-08-01") as exc:
+            period(start="2025-09-30", end="2025-08-01")
+        assert not exc.value.needs_user
+
+    def test_start_in_the_future_needs_the_user(self):
+        with pytest.raises(NeedsUserError, match=r"starts in the future \(today is 2026-01-15\)"):
+            period(start="2026-01-16", end="2026-01-31")
+
+    def test_end_in_the_future_is_model_fixable(self):
+        with pytest.raises(ValidationError, match=r"end_date 2026-02-28 is in the future \(today is 2026-01-15\)") as exc:
+            period(start="2025-12-01", end="2026-02-28")
+        assert "today's date (2026-01-15)" in str(exc.value) and not exc.value.needs_user
+
+    def test_order_too_long_wins_over_end_in_the_future(self):
+        with pytest.raises(NeedsUserError, match="spans 545 days"):
+            period(start="2025-01-01", end="2026-06-30")
+
+    def test_order_reversed_wins_over_future_start(self):
+        with pytest.raises(ValidationError, match="is after end_date") as exc:
+            period(start="2026-03-01", end="2026-02-01")
+        assert not exc.value.needs_user
+
+    def test_today_is_the_utc_date(self):
+        local = datetime(2026, 1, 16, 0, 30, tzinfo=timezone(timedelta(hours=2)))  # 2026-01-15 22:30 UTC
+        with pytest.raises(ValidationError, match=r"today is 2026-01-15"):
+            period(start="2026-01-10", end="2026-01-16", now=local)
+        assert period(start="2026-01-10", end="2026-01-15", now=local).end == local
 
 
 class TestBBox:
@@ -186,9 +322,13 @@ class TestRejectionKinds:
             lambda: validate_bbox([11.0, 43.0, 11.002, 43.002]),    # too small
             lambda: validate_bbox([0.0, 40.0, 10.0, 50.0]),         # too large
             lambda: validate_algorithm_compatibility("mndwi", provider="other"),
+            lambda: period(start="2027-03-01", end="2027-03-31"),
+            lambda: period(start="2024-01-01", end="2025-12-31"),
+            lambda: period(end="2025-09-30"),
         ],
         ids=["days-366", "days-730", "empty-location", "antimeridian", "too-narrow",
-             "too-small", "too-large", "mndwi-provider"],
+             "too-small", "too-large", "mndwi-provider", "period-in-future", "period-over-365",
+             "end-without-start"],
     )
     def test_needs_user(self, check):
         with pytest.raises(NeedsUserError) as exc:
@@ -207,9 +347,16 @@ class TestRejectionKinds:
             lambda: validate_bbox([1, 2, 3]),
             lambda: validate_bbox([10, -95, 11, 45]),
             lambda: validate_bbox([11.15, 43.83, 11.33, 43.72]),
+            lambda: period(start="01/08/2025", end="2025-09-30"),
+            lambda: period(start="2025-09-01", end="2025-09-31"),
+            lambda: period(start="2025-09-30", end="2025-08-01"),
+            lambda: period(start="2025-12-01", end="2026-02-28"),
+            lambda: period(start="2025-12-01"),
+            lambda: period(60, "2025-08-01", "2025-09-30"),
         ],
         ids=["unknown-alias", "days-0", "days-fraction", "days-text", "location-too-long",
-             "bbox-length", "bbox-latitude", "bbox-swapped"],
+             "bbox-length", "bbox-latitude", "bbox-swapped", "date-format", "date-not-a-day",
+             "start-after-end", "end-in-future", "start-without-end", "dates-and-days-back"],
     )
     def test_model_fixable(self, check):
         with pytest.raises(ValidationError) as exc:

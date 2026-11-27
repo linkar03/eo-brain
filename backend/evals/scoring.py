@@ -8,12 +8,17 @@ Scoring rules (kept deliberately simple and documented in the README):
   (``validators.resolve_algorithm``), because aliases are accepted by design.
   If a job was created, the job's algorithm is used (this also covers
   ``rerun_with_different_algorithm`` with an empty argument).
-* ``days_back`` falls back to the tool default (30) when the model omits it.
+* ``days_back`` falls back to the tool default (30) when the model omits it,
+  and is None when the call passes ``start_date`` or ``end_date``.
+  ``start_date`` and ``end_date`` are what the model passed (stripped text,
+  None when not given).
 * ``location`` is compared on normalised text (casefold, no accents, no
   punctuation) by whole-word phrase containment. ``place`` (launch_analysis
   only) is the place the job was created for, as the geocoder names it
   (None when no job): it checks where the analysis went, not what the model
-  wrote.
+  wrote. ``period`` (launch_analysis only) is likewise the job's date range,
+  "YYYY-MM-DD to YYYY-MM-DD" (None when no job): what actually ran, whichever
+  form the model used to ask for it.
 * A refusal case passes when the final turn created no job, whether the
   model declined in text, a deterministic validator rejected the call, or
   the needs-user guard refused a retry after such a rejection
@@ -96,6 +101,12 @@ def _days(raw: Any) -> Any:
     return raw
 
 
+def _date_arg(raw: Any) -> Any:
+    if isinstance(raw, str):
+        return raw.strip() or None
+    return raw
+
+
 def effective_args(call) -> Dict[str, Any]:
     """Values the scorer compares, derived from one ToolInvocation."""
     args, result = call.args, call.result or {}
@@ -104,9 +115,13 @@ def effective_args(call) -> Dict[str, Any]:
     if call.name in JOB_TOOLS:
         eff["algorithm"] = result["algorithm"] if job else _resolved_algorithm(args.get("algorithm"))
     if call.name == "launch_analysis":
-        eff["days_back"] = _days(args.get("days_back"))
+        start, end = _date_arg(args.get("start_date")), _date_arg(args.get("end_date"))
+        dated = start is not None or end is not None
+        eff["days_back"] = None if dated else _days(args.get("days_back"))
+        eff["start_date"], eff["end_date"] = start, end
         eff["location"] = args.get("location")
         eff["place"] = result.get("location") if job else None
+        eff["period"] = result.get("date_range") if job else None
     if call.name == "rerun_with_different_algorithm":
         eff["location"] = result.get("location") if job else None
     if call.name == "get_job_status":

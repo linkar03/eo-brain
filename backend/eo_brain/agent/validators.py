@@ -9,20 +9,23 @@ Every rejection is one of two kinds, and the agent loop treats them
 differently (see ``brain.Agent._execute_tool_call``):
 
 * ``ValidationError``  the model can fix it on its own: an alias it
-  spelled wrong, a number in the wrong format, a place name to correct.
-  A corrected retry in the same request is allowed.
+  spelled wrong, a number or date in the wrong format, a place name to
+  correct. A corrected retry in the same request is allowed.
 * ``NeedsUserError``   only the user can resolve it: the request is past
-  a limit (window too long, area too large or too small, ...). Any
-  value the model could retry with would be a different request from
-  the one the user made, so once one is raised no further job-creating
-  call runs in that request.
+  a limit (window too long, a period in the future, area too large or
+  too small, ...). Any value the model could retry with would be a
+  different request from the one the user made, so once one is raised no
+  further job-creating call runs in that request.
 """
 
 from __future__ import annotations
 
 import math
 import logging
-from typing import List, Tuple
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, List, Optional, Tuple
 
 from eo_brain.algorithms.base import ALGORITHMS as ALGO_REGISTRY
 
@@ -242,6 +245,135 @@ def validate_temporal_range(days_back) -> int:
             f"Satellite composites degrade over very long periods."
         )
     return days_back
+
+
+# -- The period of an analysis: a look-back window or calendar dates --
+
+# ASCII digits only: \d would also accept other scripts' digits.
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+@dataclass(frozen=True)
+class Period:
+    """
+    The UTC window a job runs on. ``days_back`` is set for the look-back
+    form and None for the calendar form (start_date + end_date).
+    """
+
+    start: datetime
+    end: datetime
+    days_back: Optional[int] = None
+
+    @property
+    def start_date(self) -> date:
+        return as_utc(self.start).date()
+
+    @property
+    def end_date(self) -> date:
+        return as_utc(self.end).date()
+
+
+def as_utc(now: datetime) -> datetime:
+    """The clock reading in UTC (a naive reading is taken as UTC)."""
+    return now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+
+
+def date_given(raw: Any) -> bool:
+    """None, "" and whitespace mean the date argument was not given."""
+    return raw is not None and not (isinstance(raw, str) and not raw.strip())
+
+
+def parse_date_arg(name: str, raw: Any) -> date:
+    """
+    One date argument: exactly YYYY-MM-DD and a real calendar day.
+    Anything else is a model mistake (ValidationError).
+    """
+    text = raw.strip() if isinstance(raw, str) else None
+    if text is None or not _ISO_DATE.fullmatch(text):
+        raise ValidationError(
+            f"{name} must be a date in YYYY-MM-DD form, e.g. 2025-08-01; got {raw!r}."
+        )
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        raise ValidationError(
+            f"{name} {text!r} is not a real calendar day. Pass an existing date in YYYY-MM-DD form."
+        ) from None
+
+
+def resolve_period(days_back: Any, start_date: Any, end_date: Any, now: datetime,
+                   *, default_days_back: int) -> Period:
+    """
+    The window of one launch, from the request's clock reading ``now``.
+
+    Without dates it is the look-back form: ``days_back`` (or the default)
+    days ending at ``now``. With dates, the checks run in this order, and
+    each says which kind it is:
+
+    * dates together with days_back, or a start without an end: the model
+      mixed the forms up (ValidationError);
+    * an end without a start: any start would be invented (NeedsUserError);
+    * a malformed date, or start after end (ValidationError);
+    * a period that starts in the future (NeedsUserError): no data exists;
+    * more than ``_MAX_DAYS_BACK`` days from start to end (NeedsUserError).
+      Checked before the end date, so a period that is both too long and
+      runs into the future is refused as too long, not sent back to the model;
+    * an end in the future after a past start (ValidationError): ending the
+      period today still covers every day of it that has happened.
+
+    The window runs from 00:00 UTC of start_date to the end of end_date,
+    or to ``now`` when the period ends today. Dates are UTC calendar days.
+    """
+    if not date_given(start_date) and not date_given(end_date):
+        days = validate_temporal_range(default_days_back if days_back is None else days_back)
+        return Period(start=now - timedelta(days=days), end=now, days_back=days)
+
+    utc_now = as_utc(now)
+    today = utc_now.date()
+    if days_back is not None:
+        raise ValidationError(
+            "Pass either days_back or start_date and end_date, not both. Use start_date and "
+            "end_date when the user names calendar dates, months, seasons or years; use days_back "
+            "for 'the last N days, weeks, months or years'."
+        )
+    if not date_given(end_date):
+        raise ValidationError(
+            "start_date and end_date go together: end_date is missing. For a period that runs "
+            f"up to now, end_date is today's date ({today})."
+        )
+    if not date_given(start_date):
+        raise NeedsUserError(
+            f"The period has an end date ({str(end_date).strip()}) but no start date. "
+            "Ask the user which date the period starts from."
+        )
+
+    start = parse_date_arg("start_date", start_date)
+    end = parse_date_arg("end_date", end_date)
+    if start > end:
+        raise ValidationError(
+            f"start_date {start} is after end_date {end}. Pass the earlier date as start_date."
+        )
+    if start > today:
+        raise NeedsUserError(
+            f"The period {start} to {end} starts in the future (today is {today}). "
+            "Satellite data exists only for past dates."
+        )
+    span = (end - start).days
+    if span > _MAX_DAYS_BACK:
+        raise NeedsUserError(
+            f"The period {start} to {end} spans {span} days, over the maximum of {_MAX_DAYS_BACK} "
+            "days (~1 year; a full calendar year is allowed). Satellite composites degrade over "
+            "very long periods."
+        )
+    if end > today:
+        raise ValidationError(
+            f"end_date {end} is in the future (today is {today}). For a period that runs up "
+            f"to now, end_date is today's date ({today})."
+        )
+
+    window_start = datetime.combine(start, time.min, tzinfo=timezone.utc)
+    window_end = min(datetime.combine(end, time.max, tzinfo=timezone.utc), utc_now)
+    return Period(start=window_start, end=window_end)
 
 
 def resolve_resolution(bbox: List[float], requested: int = 10) -> int:
