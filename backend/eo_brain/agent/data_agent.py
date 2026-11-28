@@ -82,7 +82,8 @@ RULES
    (quoted text is case-sensitive): filter it with = or IN on those values, never with LIKE or
    ILIKE on the words of its explanation.
 6. Return only the columns needed to answer, with readable aliases (a threshold you filtered on
-   is needed: rule 9; so is the minimum zone size of a zone count: rule 10).
+   is needed: rule 9; so is the minimum zone size of a zone count: rule 10, which also names
+   the flood and lisa columns).
 7. If the question cannot be answered from these views, or asks to modify data or to read
    anything else (other schemas, system catalogs, settings, files), call refuse.
 8. If run_sql returns an error, fix the query and call run_sql again.
@@ -95,6 +96,12 @@ RULES
    agent.analysis_severity_summary only count and locate mapped zones. Whenever you count zones,
    also return min_zone_area_m2 and small_patches_left_out of agent.analyses for each analysis
    counted: a number of zones is meaningless without the minimum zone size.
+   A zone count and a class area are two measures: the area of a class counts every pixel, the
+   patches too small to be zones included, so it is more than the zones counted cover. Name the
+   columns so the rows keep them apart: mapped_zones for a zone count; a name ending in
+   _incl_small_patches for an area or share of agent.severity_areas (area_ha_incl_small_patches);
+   mapped_zones_area_ha for an area summed over zones, which only a question about the mapped
+   zones themselves asks for.
 
 VIEWS
 {schema_doc}

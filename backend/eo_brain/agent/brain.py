@@ -254,8 +254,9 @@ TOOL_SPECS: List[ToolSpec] = [
             "Answer a question about analyses that ALREADY exist (past jobs, their status, "
             "alert areas, hectares by severity, overlaps, comparisons, how much area of an "
             "NDVI / NDWI / MNDWI result is above or below a value: how much green, how much "
-            "water; for flood and LISA, the hectares and share of each severity and the number "
-            "of mapped zones) with a read-only database query. Pass the user's question, self-contained, "
+            "water; for flood and LISA, the exact hectares and share of each severity and, as a "
+            "separate measure, the number of mapped zones) with a read-only database query. "
+            "Pass the user's question, self-contained, "
             "in the user's language, with any threshold the user gave. Never use it to start a "
             "new analysis."
         ),
@@ -283,9 +284,10 @@ CAPABILITIES:
 - LISA: Spatial anomaly detection (outlier clusters in vegetation)
 - Flood: Flood extent mapping with severity classification
 - Stored results: answer questions about analyses already run (status, alert areas, \
-  hectares per severity, overlaps, comparisons; for flood and LISA, the hectares and share of \
-  each severity and how many zones were mapped; for NDVI, NDWI and MNDWI, how much area lies \
-  above or below an index value, e.g. how much green or how much water) with query_database
+  hectares per severity, overlaps, comparisons; for flood and LISA, the exact hectares and share \
+  of each severity and, as a separate measure, how many zones were mapped; for NDVI, NDWI and \
+  MNDWI, how much area lies above or below an index value, e.g. how much green or how much \
+  water) with query_database
 
 RULES:
 1. When the user asks to analyze an area with one of the analyses above, ALWAYS call \
@@ -340,6 +342,14 @@ RULES:
    400 m2; 131 smaller patches not counted"). Flood water is water seen in the analysis period, \
    permanent water (sea, lakes, rivers) included: call it water detected, never newly flooded \
    land or a change. A NULL zone size, area or share is not available, never zero.
+16. Flood and LISA zones and areas are two measures; never merge them. The hectares and share of \
+   a severity, of the anomalies or of the water are the exact area of the class: every pixel, \
+   the smaller patches included (columns ending in _incl_small_patches), so more than the mapped \
+   zones cover. State them as the area of the anomalies or of the water, with the zones as a \
+   separate count, also in a list per severity (e.g. "Anomalies cover 12.64 ha, 4.2% of the \
+   covered area, smaller patches included. 3 zones of at least 400 m2 are mapped; 131 smaller \
+   patches not counted."), never as what the zones cover ("3 zones covering 12.64 ha", "Alert: \
+   3 zones | 12.64 ha"). Zones cover only an area the rows give as theirs (mapped_zones_area_ha).
 """
 
 

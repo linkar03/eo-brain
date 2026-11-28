@@ -6,11 +6,14 @@ orchestrator. Scripted model, fake executor: no network, no database.
 
 import datetime as dt
 import decimal
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 
-from eo_brain.agent.brain import Agent
+import eo_brain
+from eo_brain.agent.brain import SYSTEM_PROMPT, Agent
 from eo_brain.agent.data_agent import MAX_SQL_ATTEMPTS, DataAgent
 from eo_brain.agent.llm import ModelTurn, ProviderError, ToolCall, ToolResults, UserMessage
 from eo_brain.agent.providers.scripted import ScriptedProvider, relay_tool_results
@@ -119,6 +122,51 @@ def test_prompt_sends_areas_to_the_class_view_and_counts_with_the_zone_size():
     assert "also return min_zone_area_m2 and small_patches_left_out of agent.analyses" in rule
     # and rule 6 keeps those columns
     assert "so is the minimum zone size of a zone count: rule 10" in flat.split(" 6. ")[1].split(" 7. ")[0]
+
+
+def test_prompt_names_zone_counts_and_class_areas_apart():
+    """A zone count and a class area leave the data agent under names that cannot be read as one measure."""
+    agent, _, _ = make([])
+    flat = " ".join(agent.system_prompt().split())
+    rule = flat.split(" 10. ")[1].split(" VIEWS ")[0]
+    assert "A zone count and a class area are two measures" in rule
+    assert "the patches too small to be zones included, so it is more than the zones counted cover" in rule
+    assert "mapped_zones for a zone count" in rule
+    assert "a name ending in _incl_small_patches for an area or share of agent.severity_areas" in rule
+    assert "mapped_zones_area_ha for an area summed over zones" in rule
+    assert "which also names the flood and lisa columns" in flat.split(" 6. ")[1].split(" 7. ")[0]
+    # the orchestrator's rule 16 reads the rows by the same two names
+    orchestrator_rule = " ".join(SYSTEM_PROMPT.split()).split(" 16. ")[1]
+    assert "_incl_small_patches" in orchestrator_rule and "mapped_zones_area_ha" in orchestrator_rule
+
+
+VIEWS_SQL = Path(eo_brain.__file__).resolve().parent / "db" / "agent_views.sql"
+
+
+def view_comment(target):
+    """COMMENT ON text of "VIEW agent.x" or "COLUMN agent.x.y" in agent_views.sql (no database needed)."""
+    found = re.search(rf"COMMENT ON {re.escape(target)} IS\s+(\$\$|')(.*?)\1;",
+                      VIEWS_SQL.read_text(encoding="utf-8"), re.S)
+    assert found, target
+    return found.group(2)
+
+
+def test_view_comments_keep_zone_counts_and_class_areas_apart():
+    """The live prompt is built from these comments: the class area is not the area of the zones counted."""
+    areas = view_comment("VIEW agent.severity_areas")
+    assert "also the patches too small to be mapped as zones" in areas
+    assert "The area of a class is therefore more than its mapped zones cover" in areas
+    assert "never the area of the zones counted" in areas
+    assert "Give its columns a name ending in _incl_small_patches" in areas
+    assert "SELECT SUM(area_ha) AS area_ha_incl_small_patches FROM agent.severity_areas" in areas
+    assert "patches too small to be zones included" in view_comment("COLUMN agent.severity_areas.area_ha")
+    assert ("left out of the zone count; their area is still counted in agent.severity_areas"
+            in view_comment("VIEW agent.analyses"))
+    assert ("It qualifies the number of zones, not the areas of agent.severity_areas"
+            in view_comment("COLUMN agent.analyses.min_zone_area_m2"))
+    assert ("left out of the zone count only: their pixels are still in the areas of agent.severity_areas"
+            in view_comment("COLUMN agent.analyses.small_patches_left_out"))
+    assert "not of any zone" in view_comment("COLUMN agent.analyses.small_patches_area_ha")
 
 
 def test_area_hint_is_appended_by_code():

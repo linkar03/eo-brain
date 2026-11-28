@@ -780,7 +780,7 @@ def test_prompt_states_a_threshold_with_every_figure_that_depends_on_one():
 
 def test_prompt_states_zone_counts_with_their_size_and_flood_water_as_water_seen():
     flat = " ".join(SYSTEM_PROMPT.split())
-    rule = flat.split(" 15. ")[1]
+    rule = flat.split(" 15. ")[1].split(" 16. ")[0]
     assert "state a number of zones (anomalies, flooded areas) with the minimum zone size" in rule
     assert "the number of smaller patches left out" in rule
     assert "permanent water (sea, lakes, rivers) included" in rule
@@ -788,8 +788,31 @@ def test_prompt_states_zone_counts_with_their_size_and_flood_water_as_water_seen
     assert "A NULL zone size, area or share is not available, never zero" in rule
     # routing: such questions are about stored results
     spec = next(t for t in TOOL_SPECS if t.name == "query_database")
-    assert "for flood and LISA, the hectares and share of each severity" in spec.description
-    assert "for flood and LISA, the hectares and share of each severity and how many zones were mapped" in flat
+    assert "for flood and LISA, the exact hectares and share of each severity" in spec.description
+    assert "for flood and LISA, the exact hectares and share of each severity" in flat
+
+
+def test_prompt_keeps_zone_counts_and_class_areas_apart():
+    """Live reply of 2026-11-27 (LISA, Fiesole): "534 anomaly zones (of at least 1,600 m2) were
+    mapped, covering 394.28 hectares". Every number was in the rows, but 394.28 ha is the area of
+    the anomaly classes, small patches included; the 534 zones alone cover 143.44 ha."""
+    flat = " ".join(SYSTEM_PROMPT.split())
+    rule = flat.split(" 16. ")[1]
+    assert "zones and areas are two measures; never merge them" in rule
+    assert "The hectares and share of a severity, of the anomalies or of the water are the exact area" in rule
+    assert "every pixel, the smaller patches included" in rule
+    assert "so more than the mapped zones cover" in rule
+    assert "with the zones as a separate count, also in a list per severity" in rule
+    # the two wordings of the live reply, as what not to write
+    assert 'never as what the zones cover ("3 zones covering 12.64 ha", "Alert: 3 zones | 12.64 ha")' in rule
+    # the area of the zones is said only of a column the data agent names as such
+    assert "Zones cover only an area the rows give as theirs (mapped_zones_area_ha)" in rule
+    # the capability list and the tool description name them as two measures, not as one figure
+    spec = next(t for t in TOOL_SPECS if t.name == "query_database")
+    assert "and, as a separate measure, the number of mapped zones" in spec.description
+    assert "and, as a separate measure, how many zones were mapped" in flat
+    assert "share of each severity and how many zones" not in flat
+    assert "share of each severity and the number of mapped zones" not in spec.description
 
 
 # ---------------------------------------------------------------- module entry point

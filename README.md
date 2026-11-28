@@ -306,6 +306,13 @@ A `flood` or `lisa` result is a class per pixel: a severity from 0 to 3 and, for
 
 **What the data agent sees.** `agent.severity_areas` has one row per class, with `severity_label` (`none`, `watch`, `suspect`, `alert`), `quadrant_label` (`HL`, `LH`, for the anomaly classes only), `area_ha`, `area_km2`, `pct_of_covered_area`, and for LISA `vegetated` and `pct_of_vegetated_area`. The vegetated pixels are those LISA classified: NDVI of at least 0.3, with vegetated pixels around them. The LISA rows of severity 0 are grouped into vegetated and not. The comment sends areas and shares here, and zone counts to `agent.alert_areas` and `agent.analysis_severity_summary`. Two prompt rules go with it. The data agent returns `min_zone_area_m2` and `small_patches_left_out` with any number of zones. The orchestrator states a zone count with the minimum size and the patches left out, says that a NULL figure is not available, and calls flood water "water detected". Neither rule is enforced by code; the gold queries of the SQL suite return those columns.
 
+**A zone count and a class area are stated apart.** They describe the same result but are not the same quantity, and a reply that joins them is wrong even when every number in it is right. This was observed live on 2026-11-27, on a LISA analysis around Fiesole, with the question "How many anomalies were detected in that analysis, and what share of the area do they cover?". The reply said "a total of 534 anomaly zones (of at least 1,600 m²) were mapped, covering 394.28 hectares (approx. 4.20% of the covered area)", and its list per severity read "Watch: 263 zones | 199.08 ha". The 394.28 ha are the area of the anomaly classes in `agent.severity_areas`, which includes the 4,751 patches too small to be zones; the 534 zones alone cover 143.44 ha. Two more prompt rules now go with the views:
+
+- The data agent (rule 10) names its columns after what they measure: `mapped_zones` for a zone count, a name ending in `_incl_small_patches` for an area or share of `agent.severity_areas`, and `mapped_zones_area_ha` for an area summed over zones. The comments of `agent.severity_areas` and of the zone columns of `agent.analyses` say the same: the class area is more than its mapped zones cover, and the small patches are left out of the zone count only.
+- The orchestrator (rule 16) states the hectares and the share as the area of the anomalies or of the water, small patches included, with the zones as a separate count, also in a list per severity. It says that zones cover an area only for a column the rows give as theirs.
+
+Neither is enforced by code, and no eval scores column names or the text of a reply. **The wording of a live model after this change has not been checked.**
+
 **`flood` measures water seen in the period, not a flood.** Its severity comes from the highest water index of each pixel over the window (MNDWI, or NDWI when the scenes have no SWIR band): watch above 0, suspect above 0.2, alert above 0.35 (`FloodConfig`). Sea, lakes and rivers count as water, and there is no baseline period to compare with. The view comment and the orchestrator's rule say so; the analysis itself is unchanged (see [Limitations](#limitations)).
 
 ## Voice input: the gesture
@@ -417,7 +424,7 @@ The descriptors removed before searching the bare name:
 | | Which column types may leave the database |
 | | The number of attempts |
 
-Three rules are **not** enforced by code: the instruction to "only state numbers that appear in the rows", the data agent's rule to return any index threshold it filtered on as a column, and its rule to return the minimum zone size and the patches left out with any number of zones. The orchestrator prompt asks for the first, the data-agent prompt for the other two, and the chat API returns the executed SQL and the rows next to the model's text, so a reader can check. The gate accepts the threshold and class-area queries as they are (literals, `SUM`, `CASE`, `FILTER`, `BETWEEN`, scalar subqueries): nothing was widened for them.
+Four rules are **not** enforced by code: the instruction to "only state numbers that appear in the rows", the data agent's rule to return any index threshold it filtered on as a column, its rule to return the minimum zone size and the patches left out with any number of zones, and its rule to name a zone count and a class area as two measures (`mapped_zones`, `…_incl_small_patches`). The orchestrator prompt asks for the first, the data-agent prompt for the other three, and the chat API returns the executed SQL and the rows next to the model's text, so a reader can check. The gate accepts the threshold and class-area queries as they are (literals, `SUM`, `CASE`, `FILTER`, `BETWEEN`, scalar subqueries): nothing was widened for them.
 
 **Closed-set columns list their exact values.** A view column with a fixed set of values says so in its comment as `Values: 'HL', 'LH'`. Quoted text is the exact, case-sensitive value the view returns, and integer codes are bare. Explanations follow the list. The data-agent prompt says to filter those columns with `=` or `IN` on the listed values. `tests/test_db_view_values.py` (DB-backed) checks that each list is exactly what the column can produce. The expected values are not a second hand-written list. They come from what decides the values:
 
@@ -527,7 +534,7 @@ docker compose up --build
 
 All three ports are published on `127.0.0.1` only: the API has no authentication and the database superuser is `postgres`/`postgres`.
 
-The database init scripts (`schema.sql`, `schema_vectors.sql`, `agent_views.sql`, `agent_role.sql`, and `agent_role_password.sh` to set the role password from `AGENT_DB_PASSWORD`) run **only on an empty data volume**. To add the data agent to an existing volume, or to bring one up to date (the tables `index_value_bins` and `severity_class_areas`, the unique key on `jobs (id, algorithm)` that the second one references, and the views `agent.index_value_distribution` and `agent.severity_areas` were added later), apply the scripts by hand, in this order; they are idempotent, and they keep the rows already stored:
+The database init scripts (`schema.sql`, `schema_vectors.sql`, `agent_views.sql`, `agent_role.sql`, and `agent_role_password.sh` to set the role password from `AGENT_DB_PASSWORD`) run **only on an empty data volume**. To add the data agent to an existing volume, or to bring one up to date (the tables `index_value_bins` and `severity_class_areas`, the unique key on `jobs (id, algorithm)` that the second one references, and the views `agent.index_value_distribution` and `agent.severity_areas` were added later), apply the scripts by hand, in this order; they are idempotent, and they keep the rows already stored. The same holds after a change to the view comments in `agent_views.sql`: the data agent's prompt is built from the comments stored in the database, read once per API process, so apply the file and restart the API:
 
 ```bash
 docker compose exec -T db psql -U postgres -d eo_brain < backend/eo_brain/db/schema_vectors.sql
@@ -658,7 +665,7 @@ These need no network, no database and no LLM. They cover:
   - the block lasting one request only;
 - the kind of every validator rejection;
 - the SQL gate: over 200 accept and reject cases, including CTE-scope, quoting and lexer tricks, and the threshold queries over `agent.index_value_distribution` (still rejected: the table behind it, an unqualified name, casts to text, a missing `LIMIT`);
-- the data-agent loop, the prompt rules on thresholds (both agents), and those on zone counts, class areas and flood water (both agents);
+- the data-agent loop, the prompt rules on thresholds (both agents), those on zone counts, class areas and flood water (both agents), and those that keep a zone count and a class area apart (both agents, the two prompts using the same column names, and the comment texts of `agent_views.sql`, read from the file);
 - the eval scorers, including how provider failures, the daily-quota stop and exit codes are handled.
 
 ```bash
@@ -915,15 +922,16 @@ rows; that case passes on both models in the runs above.
 - **Gemini is the only live provider.** The provider interface is small, so adding a second one should not touch the agent loop, but none is implemented yet.
 - **The datasets are small and hand-written,** and the SQL suite runs on synthetic data. Live results vary between runs, and there is no repeat or variance reporting yet.
 - **"Only cite numbers from the rows" is a prompt rule,** not a code check. The UI shows the rows so it can be verified.
-- **Six more prompt rules are not enforced** (see [The deterministic boundary](#the-deterministic-boundary)):
+- **Seven more prompt rules are not enforced** (see [The deterministic boundary](#the-deterministic-boundary)):
   - The model must not shorten an over-long window **before** its first call. Only a retry after a rejection is blocked.
   - The model must not run a supported analysis in place of an unsupported one.
   - The model must pass a calendar period as `start_date` and `end_date`, not as a look-back window, and with the dates the user meant.
   - The model must explain an analysis only from tool results, and say so when they do not explain it.
   - An area of green or water must be stated with its threshold (the data agent returns it as a column, the orchestrator quotes it), and a NULL area must not be reported as zero.
   - A number of `flood` or `lisa` zones must be stated with the minimum zone size and the patches left out (the data agent returns them as columns), and `flood` water as water detected, permanent water included.
+  - The hectares and the share of a `flood` or `lisa` class must be stated as the area of the anomalies or of the water, small patches included, apart from the number of mapped zones, never as the area those zones cover (the data agent names the columns apart). A live reply of 2026-11-27 joined the two (see [Flood and LISA](#flood-and-lisa-zones-and-areas)).
 
-  The `tools` suite measures the first two; it has cases for the third that have not been run against a live model; and it measures only the routing of the fourth: the text of a reply is not scored. For the fifth and the sixth, the SQL suite's gold queries require the threshold and zone-size columns and the `tools` suite checks the routing; neither has been run against a live model, and the reply text is not scored.
+  The `tools` suite measures the first two; it has cases for the third that have not been run against a live model; and it measures only the routing of the fourth: the text of a reply is not scored. For the fifth and the sixth, the SQL suite's gold queries require the threshold and zone-size columns and the `tools` suite checks the routing; neither has been run against a live model, and the reply text is not scored. Nothing measures the seventh: the suites score neither column names nor reply text, and no live model has been run with it.
 - **Calendar periods:**
   - Which dates the user's words mean is the model's reading, by a prompt rule: "in August" with no year is meant as the most recent August, and "to today" as today's date. Code validates the dates it is given, not that they match the request. How often a live model gets them right has not been measured.
   - Dates are UTC calendar days. A period runs from 00:00 UTC of its first day to the end of its last day, or to the moment of the request when it ends today, and "today" is the UTC date.
